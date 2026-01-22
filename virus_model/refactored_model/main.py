@@ -23,7 +23,8 @@ from .constants import (
 )
 from .ode import seir_ode
 from .model import VirusModel
-from .plotting import save_single_run_results, save_batch_results_plot
+from .plotting import save_single_run_results, save_batch_results_plot, draw_petri_net
+from .gillespie import run_gillespie_simulation
 
 sim_params = solara.reactive({
     "N": 500,
@@ -41,9 +42,15 @@ sim_params = solara.reactive({
 model_instance = solara.reactive(None)
 run_data = solara.reactive(None)
 ode_data = solara.reactive(None)
-batch_results = solara.reactive(None)
+gillespie_data = solara.reactive(None)
+stochastic_results = solara.reactive(None)
 is_running = solara.reactive(False)
 last_save_msg = solara.reactive("")
+
+stochastic_params = solara.reactive({
+    "runs": 50,
+    "threshold": 150,
+})
 
 
 async def run_simulation():
@@ -54,16 +61,21 @@ async def run_simulation():
     p = sim_params.value
     STEPS = p["steps"]
     INCUBATION_MEAN = 3
+    sigma = 1.0 / INCUBATION_MEAN
 
     # ODE
-    sigma = 1.0 / INCUBATION_MEAN
     y0 = (p["N"] - 1, 1, 0, 0)
     t_ode = np.linspace(0, STEPS, STEPS)
     ret = odeint(seir_ode, y0, t_ode, args=(p["N"], p["beta"], sigma, p["gamma"]))
     ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
     ode_data.set(ode_curr)
+    
+    # Gillespie (run in executor to not block)
+    loop = asyncio.get_running_loop()
+    gillespie_df = await loop.run_in_executor(None, run_gillespie_simulation, p["N"], p["beta"], p["gamma"], sigma, STEPS)
+    gillespie_data.set(gillespie_df)
 
-    # Modello
+    # Modello ABM
     model = VirusModel(N=p["N"], width=p["grid_size"], height=p["grid_size"],
                        beta=p["beta"], gamma=p["gamma"], incubation_mean=INCUBATION_MEAN,
                        topology=p["topology"],
@@ -82,8 +94,8 @@ async def run_simulation():
         await asyncio.sleep(0.05)
 
     try:
-        p1, p2 = save_single_run_results(model, run_data.value, ode_curr)
-        last_save_msg.set(f"✅ Salvato con successo in {OUTPUT_DIR}")
+        save_single_run_results(model, run_data.value, ode_curr, gillespie_data.value)
+        last_save_msg.set(f"✅ Report salvato con successo in {OUTPUT_DIR}")
     except Exception as e:
         last_save_msg.set(f"❌ Errore salvataggio: {e}")
 
@@ -94,25 +106,38 @@ def start_simulation_wrapper():
     asyncio.create_task(run_simulation())
 
 
-def run_stochastic_batch():
-    p = sim_params.value
+def run_reachability_analysis():
+    sim_p = sim_params.value
+    stoch_p = stochastic_params.value
+    
     peak_infections = []
-    last_save_msg.set("Esecuzione batch in corso...")
+    runs_exceeding_threshold = 0
+    
+    last_save_msg.set(f"Esecuzione di {stoch_p['runs']} run in corso...")
 
-    for _ in range(30):
-        m = VirusModel(N=p["N"], width=20, height=20,
-                       beta=p["beta"], gamma=p["gamma"], incubation_mean=3,
-                       topology="network",
-                       vaccine_strategy="none", vaccine_pct=0.0,
-                       scheduler_type="random", prob_symptomatic=0.6)
+    for i in range(stoch_p["runs"]):
+        m = VirusModel(N=sim_p["N"], width=20, height=20,
+                       beta=sim_p["beta"], gamma=sim_p["gamma"], incubation_mean=3,
+                       topology=sim_p["topology"],
+                       vaccine_strategy=sim_p["vax_strat"], vaccine_pct=sim_p["vax_pct"],
+                       scheduler_type="random", prob_symptomatic=sim_p["prob_symp"])
+        
         history = []
-        for _ in range(50):
+        exceeded = False
+        for _ in range(sim_p["steps"]):
             m.step()
             tot_inf = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
             history.append(tot_inf)
-        peak_infections.append(max(history))
+            if not exceeded and tot_inf > stoch_p["threshold"]:
+                exceeded = True
+        
+        if exceeded:
+            runs_exceeding_threshold += 1
+        
+        peak_infections.append(max(history) if history else 0)
 
-    batch_results.set(peak_infections)
+    probability = runs_exceeding_threshold / stoch_p["runs"]
+    stochastic_results.set({"probability": probability, "peaks": peak_infections})
 
     try:
         pb = save_batch_results_plot(peak_infections)
@@ -123,6 +148,10 @@ def run_stochastic_batch():
 
 @solara.component
 def Dashboard():
+    # Workaround to ensure slider updates when N changes
+    stochastic_params.use()
+    sim_params.use()
+    
     with solara.Sidebar():
         solara.Markdown("## Parametri Simulazione")
         solara.SliderInt(label="Popolazione (N)", value=sim_params.value["N"], min=50, max=1000, step=50, on_value=lambda v: sim_params.set({**sim_params.value, "N": v}))
@@ -147,7 +176,7 @@ def Dashboard():
         solara.Markdown("---")
         solara.Button("Avvia Simulazione LIVE", on_click=start_simulation_wrapper, color="primary",
                       disabled=is_running.value, style={"width": "100%", "margin-bottom": "10px"})
-        solara.Button("Analisi Batch (Estinzione)", on_click=run_stochastic_batch, color="warning",
+        solara.Button("Avvia Analisi di Raggiungibilità", on_click=run_reachability_analysis, color="warning",
                       style={"width": "100%"})
 
         if last_save_msg.value:
@@ -163,76 +192,114 @@ def Dashboard():
                     df = run_data.value
                     model = model_instance.value
                     ode = ode_data.value
+                    gsp = gillespie_data.value
+
+                    # --- GRAFICO 1 (CURVE) ---
+                    fig1, ax1 = plt.subplots(figsize=(12, 4))
+                    if ode is not None:
+                        ax1.plot(ode["t"], ode["S"], '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
+                        ax1.plot(ode["t"], ode["E"], '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
+                        ax1.plot(ode["t"], ode["I"], '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
+                        ax1.plot(ode["t"], ode["R"], '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
+                    
+                    if gsp is not None:
+                        ax1.plot(gsp["time"], gsp["S"], ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
+                        ax1.plot(gsp["time"], gsp["E"], ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
+                        ax1.plot(gsp["time"], gsp["I"], ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
+                        ax1.plot(gsp["time"], gsp["R"], ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
+
+                    if not df.empty:
+                        ax1.plot(df["S"], label="S (ABM)", color=AGENT_COLORS[0])
+                        ax1.plot(df["E"], label="E (ABM)", color=AGENT_COLORS[1])
+                        ax1.plot(df["I_asymp"] + df["I_symp"], label="I (ABM)", color=AGENT_COLORS[3])
+                        ax1.plot(df["R"], label="R (ABM)", color=AGENT_COLORS[4])
+
+                        if "Lockdown" in df.columns:
+                            lockdown_steps = df[df["Lockdown"] == 1].index
+                            if len(lockdown_steps) > 0:
+                                ax1.axvspan(lockdown_steps[0], lockdown_steps[-1], color='red', alpha=0.1,
+                                            label="Lockdown")
+
+                    ax1.set_title(f"Dinamica SEIR - Step: {model.steps_count}")
+                    ax1.set_xlim(0, sim_params.value["steps"])
+                    ax1.set_ylim(0, model.N)
+                    ax1.legend(loc="upper right", fontsize='x-small', ncol=3)
+                    ax1.grid(True, alpha=0.3)
+                    solara.FigureMatplotlib(fig1, dependencies=[df])
 
                     with solara.Row():
-                        # --- GRAFICO 1 ---
-                        fig1, ax1 = plt.subplots(figsize=(6, 4))
-                        if ode is not None:
-                            ax1.plot(ode["t"], ode["S"], '--', color=AGENT_COLORS[0], alpha=0.4, label="S (ODE)")
-                            ax1.plot(ode["t"], ode["E"], '--', color=AGENT_COLORS[1], alpha=0.4, label="E (ODE)")
-                            ax1.plot(ode["t"], ode["I"], '--', color=AGENT_COLORS[3], alpha=0.4, label="I (ODE)")
+                        # --- GRAFICO 2 (GRIGLIA/RETE) ---
+                        with solara.Column():
+                            fig2, ax2 = plt.subplots(figsize=(6, 5))
+                            if model.topology == "network":
+                                colors = [AGENT_COLORS[a.state] for a in model.agents]
+                                pos = nx.spring_layout(model.G, seed=42)
+                                nx.draw(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors, width=0.2)
+                                ax2.set_title("Diffusione Rete")
+                            else:
+                                grid_arr = np.full((model.grid.width, model.grid.height), STATE_EMPTY)
+                                for a in model.agents:
+                                    grid_arr[a.pos] = a.state
+                                ax2.imshow(grid_arr, cmap=GRID_CMAP, vmin=-1, vmax=4, interpolation="nearest")
+                                ax2.set_title("Diffusione Griglia")
+                                legend_elements = [Patch(facecolor=c, edgecolor='k', label=l) for c, l in
+                                                   zip(AGENT_COLORS, SHORT_LABELS)]
+                                ax2.legend(handles=legend_elements, loc='upper left',
+                                           fontsize='x-small')
+                            ax2.axis('off')
+                            solara.FigureMatplotlib(fig2, dependencies=[df])
 
-                        if not df.empty:
-                            ax1.plot(df["S"], label="S", color=AGENT_COLORS[0])
-                            ax1.plot(df["E"], label="E", color=AGENT_COLORS[1])
-                            ax1.plot(df["I_asymp"], label="I(hid)", color=AGENT_COLORS[2], linestyle="-.")
-                            ax1.plot(df["I_symp"], label="I(det)", color=AGENT_COLORS[3])
-                            ax1.plot(df["R"], label="R", color=AGENT_COLORS[4])
-
-                            if "Lockdown" in df.columns:
-                                lockdown_steps = df[df["Lockdown"] == 1].index
-                                if len(lockdown_steps) > 0:
-                                    ax1.axvspan(lockdown_steps[0], lockdown_steps[-1], color='red', alpha=0.1,
-                                                label="Lockdown")
-
-                        ax1.set_title(f"Step: {model.steps_count}")
-                        ax1.set_xlim(0, sim_params.value["steps"])
-                        ax1.set_ylim(0, model.N)
-                        ax1.legend(loc="upper right", fontsize='x-small', ncol=2)
-                        ax1.grid(True, alpha=0.3)
-                        solara.FigureMatplotlib(fig1)
-
-                        # --- GRAFICO 2 ---
-                        fig2, ax2 = plt.subplots(figsize=(6, 4))
-
-                        if model.topology == "network":
-                            colors = [AGENT_COLORS[a.state] for a in model.agents]
-                            pos = nx.spring_layout(model.G, seed=42)
-                            nx.draw(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors, width=0.2)
-                            ax2.set_title("Diffusione Rete")
-                        else:
-                            # Inizializziamo con STATE_EMPTY (-1)
-                            grid_arr = np.full((model.grid.width, model.grid.height), STATE_EMPTY)
-                            for a in model.agents:
-                                grid_arr[a.pos] = a.state
-
-                            # vmin=-1 forza il bianco per lo sfondo
-                            ax2.imshow(grid_arr, cmap=GRID_CMAP, vmin=-1, vmax=4, interpolation="nearest")
-                            ax2.set_title("Diffusione Griglia")
-
-                            legend_elements = [Patch(facecolor=c, edgecolor='k', label=l) for c, l in
-                                               zip(AGENT_COLORS, SHORT_LABELS)]
-                            ax2.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.25, 1),
-                                       fontsize='x-small')
-
-                        ax2.axis('off')
-                        solara.FigureMatplotlib(fig2)
+                        # --- GRAFICO 3 (RETE DI PETRI) ---
+                        with solara.Column():
+                            fig3, ax3 = plt.subplots(figsize=(6, 5))
+                            if not df.empty:
+                                latest = df.iloc[-1]
+                                S, E, I, R = latest["S"], latest["E"], latest["I_asymp"] + latest["I_symp"], latest["R"]
+                                draw_petri_net(ax3, S, E, I, R)
+                            else:
+                                # Draw empty petri net before simulation starts
+                                draw_petri_net(ax3, sim_params.value['N']-1, 1, 0, 0)
+                            solara.FigureMatplotlib(fig3, dependencies=[df])
                 else:
                     solara.Info("Premi START per vedere l'animazione.")
 
             # --- TAB 2: BATCH ---
             with solara.lab.Tab("Analisi Stocastica"):
-                if batch_results.value is not None:
-                    peaks = batch_results.value
+                solara.Markdown("### Impostazioni Analisi di Raggiungibilità")
+                solara.SliderInt(
+                    label="Numero di Run", 
+                    value=stochastic_params.value["runs"], 
+                    min=10, max=200, step=10, 
+                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "runs": v})
+                )
+                solara.SliderInt(
+                    label="Soglia Infetti (Threshold)", 
+                    value=stochastic_params.value["threshold"], 
+                    min=1, max=sim_params.value["N"], 
+                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "threshold": v})
+                )
+                
+                if stochastic_results.value is not None:
+                    res = stochastic_results.value
+                    prob_pct = res["probability"] * 100
+                    
+                    solara.Success(
+                        f"Probabilità che gli infetti superino la soglia ({stochastic_params.value['threshold']}): "
+                        f"**{prob_pct:.1f}%** (calcolata su {stochastic_params.value['runs']} run)"
+                    )
+
+                    peaks = res["peaks"]
                     fig3, ax3 = plt.subplots(figsize=(8, 4))
                     ax3.hist(peaks, bins=15, color="purple", alpha=0.7, edgecolor='black')
+                    ax3.axvline(x=stochastic_params.value['threshold'], color='r', linestyle='--', linewidth=2, label=f"Soglia ({stochastic_params.value['threshold']})")
                     ax3.set_title(f"Distribuzione Picchi Epidemici (su {len(peaks)} runs)")
                     ax3.set_xlabel("Picco Massimo Infetti")
                     ax3.set_ylabel("Frequenza")
+                    ax3.legend()
                     ax3.grid(axis='y', alpha=0.5, linestyle='--')
                     solara.FigureMatplotlib(fig3)
                 else:
-                    solara.Info("Premi 'Analisi Batch' per generare l'istogramma.")
+                    solara.Info("Premi 'Avvia Analisi di Raggiungibilità' per generare il calcolo di probabilità e l'istogramma.")
 
 
 @solara.component
