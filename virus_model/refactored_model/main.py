@@ -49,13 +49,24 @@ run_data = solara.reactive(None)
 ode_data = solara.reactive(None)
 gillespie_data = solara.reactive(None)
 stochastic_results = solara.reactive(None)
+
 is_running = solara.reactive(False)
+is_analyzing_reachability = solara.reactive(False)
+is_sweeping = solara.reactive(False)
 last_save_msg = solara.reactive("")
 
 stochastic_params = solara.reactive({
     "runs": 50,
     "threshold": 150,
 })
+
+sweep_params = solara.reactive({
+    "parameter": "beta",
+    "start": 0.1,
+    "end": 1.0,
+    "num_steps": 10,
+})
+sweep_results = solara.reactive(None)
 
 
 async def run_simulation():
@@ -116,6 +127,10 @@ def start_simulation_wrapper():
 
 
 def run_reachability_analysis():
+    if is_analyzing_reachability.value: return
+    is_analyzing_reachability.set(True)
+    stochastic_results.set(None)
+    
     sim_p = sim_params.value
     stoch_p = stochastic_params.value
     
@@ -151,10 +166,56 @@ def run_reachability_analysis():
     stochastic_results.set({"probability": probability, "peaks": peak_infections})
 
     try:
-        pb = save_batch_results_plot(peak_infections)
+        save_batch_results_plot(peak_infections)
         last_save_msg.set(f"✅ Batch salvato in {OUTPUT_DIR}")
     except Exception as e:
         last_save_msg.set(f"❌ Errore batch: {e}")
+    
+    is_analyzing_reachability.set(False)
+
+
+def run_parameter_sweep():
+    if is_sweeping.value: return
+    is_sweeping.set(True)
+    sweep_results.set(None)
+    last_save_msg.set("")
+
+    sim_p = sim_params.value
+    sw_p = sweep_params.value
+    
+    param_to_sweep = sw_p["parameter"]
+    param_values = np.linspace(sw_p["start"], sw_p["end"], sw_p["num_steps"])
+    
+    results = []
+    
+    last_save_msg.set(f"Esecuzione sweep per '{param_to_sweep}'...")
+
+    for i, val in enumerate(param_values):
+        last_save_msg.set(f"Sweep per '{param_to_sweep}': run {i + 1}/{sw_p['num_steps']}")
+        
+        current_sim_params = sim_p.copy()
+        current_sim_params[param_to_sweep] = val
+        
+        m = VirusModel(N=current_sim_params["N"], width=20, height=20,
+                       beta=current_sim_params["beta"], gamma=current_sim_params["gamma"], incubation_mean=3,
+                       topology=current_sim_params["topology"],
+                       ws_k=current_sim_params["ws_k"], ws_p=current_sim_params["ws_p"], er_p=current_sim_params["er_p"],
+                       comm_l=current_sim_params["comm_l"], comm_k=current_sim_params["comm_k"],
+                       vaccine_strategy=current_sim_params["vax_strat"], vaccine_pct=current_sim_params["vax_pct"],
+                       scheduler_type="random", prob_symptomatic=current_sim_params["prob_symp"])
+        
+        peak_infection = 0
+        for _ in range(current_sim_params["steps"]):
+            m.step()
+            total_infected = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
+            if total_infected > peak_infection:
+                peak_infection = total_infected
+        
+        results.append((val, peak_infection))
+
+    sweep_results.set(results)
+    last_save_msg.set("✅ Sweep completato.")
+    is_sweeping.set(False)
 
 
 @solara.component
@@ -163,6 +224,8 @@ def Dashboard():
     stochastic_params.use()
     sim_params.use()
     
+    is_busy = is_running.value or is_analyzing_reachability.value or is_sweeping.value
+
     with solara.Sidebar():
         solara.Markdown("## Parametri Simulazione")
 
@@ -170,46 +233,46 @@ def Dashboard():
         
         solara.SliderInt(label="Popolazione (N)", value=sim_params.value["N"], min=50, max=1000, step=50, 
                         on_value=lambda v: sim_params.set({**sim_params.value, "N": v}),
-                        disabled=is_communities)
+                        disabled=is_communities or is_busy)
         
-        solara.SliderInt(label="Durata (steps)", value=sim_params.value["steps"], min=20, max=500, step=10, on_value=lambda v: sim_params.set({**sim_params.value, "steps": v}))
-        solara.SliderInt(label="Dimensione Griglia", value=sim_params.value["grid_size"], min=10, max=100, step=5, on_value=lambda v: sim_params.set({**sim_params.value, "grid_size": v}))
+        solara.SliderInt(label="Durata (steps)", value=sim_params.value["steps"], min=20, max=500, step=10, on_value=lambda v: sim_params.set({**sim_params.value, "steps": v}), disabled=is_busy)
+        solara.SliderInt(label="Dimensione Griglia", value=sim_params.value["grid_size"], min=10, max=100, step=5, on_value=lambda v: sim_params.set({**sim_params.value, "grid_size": v}), disabled=is_busy)
         
         solara.Select(label="Topologia", value=sim_params.value["topology"], values=["grid", "network", "watts_strogatz", "erdos_renyi", "communities"],
-                      on_value=lambda v: sim_params.set({**sim_params.value, "topology": v}))
+                      on_value=lambda v: sim_params.set({**sim_params.value, "topology": v}), disabled=is_busy)
         
         if sim_params.value["topology"] == "watts_strogatz":
-            solara.SliderInt(label="Watts-Strogatz K", value=sim_params.value["ws_k"], min=2, max=20, on_value=lambda v: sim_params.set({**sim_params.value, "ws_k": v}))
-            solara.SliderFloat(label="Watts-Strogatz P", value=sim_params.value["ws_p"], min=0.0, max=1.0, step=0.05, on_value=lambda v: sim_params.set({**sim_params.value, "ws_p": v}))
+            solara.SliderInt(label="Watts-Strogatz K", value=sim_params.value["ws_k"], min=2, max=20, on_value=lambda v: sim_params.set({**sim_params.value, "ws_k": v}), disabled=is_busy)
+            solara.SliderFloat(label="Watts-Strogatz P", value=sim_params.value["ws_p"], min=0.0, max=1.0, step=0.05, on_value=lambda v: sim_params.set({**sim_params.value, "ws_p": v}), disabled=is_busy)
 
         if sim_params.value["topology"] == "erdos_renyi":
-            solara.SliderFloat(label="Erdos-Renyi P", value=sim_params.value["er_p"], min=0.0, max=0.2, step=0.01, on_value=lambda v: sim_params.set({**sim_params.value, "er_p": v}))
+            solara.SliderFloat(label="Erdos-Renyi P", value=sim_params.value["er_p"], min=0.0, max=0.2, step=0.01, on_value=lambda v: sim_params.set({**sim_params.value, "er_p": v}), disabled=is_busy)
 
         if is_communities:
-            solara.SliderInt(label="Numero Comunità (L)", value=sim_params.value["comm_l"], min=2, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_l": v}))
-            solara.SliderInt(label="Dimensione Comunità (K)", value=sim_params.value["comm_k"], min=5, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_k": v}))
+            solara.SliderInt(label="Numero Comunità (L)", value=sim_params.value["comm_l"], min=2, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_l": v}), disabled=is_busy)
+            solara.SliderInt(label="Dimensione Comunità (K)", value=sim_params.value["comm_k"], min=5, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_k": v}), disabled=is_busy)
             total_n = sim_params.value["comm_l"] * sim_params.value["comm_k"]
             solara.Info(f"Popolazione totale (N = L*K): {total_n}")
 
         solara.Select(label="Scheduler", value=sim_params.value["scheduler"], values=["random", "simultaneous"],
-                      on_value=lambda v: sim_params.set({**sim_params.value, "scheduler": v}))
+                      on_value=lambda v: sim_params.set({**sim_params.value, "scheduler": v}), disabled=is_busy)
         solara.SliderFloat(label="Beta (Contagio)", value=sim_params.value["beta"], min=0.1, max=1.0, step=0.05,
-                           on_value=lambda v: sim_params.set({**sim_params.value, "beta": v}))
+                           on_value=lambda v: sim_params.set({**sim_params.value, "beta": v}), disabled=is_busy)
         solara.SliderFloat(label="Gamma (Guarigione)", value=sim_params.value["gamma"], min=0.05, max=0.5, step=0.01,
-                           on_value=lambda v: sim_params.set({**sim_params.value, "gamma": v}))
+                           on_value=lambda v: sim_params.set({**sim_params.value, "gamma": v}), disabled=is_busy)
 
         solara.Markdown("---")
         solara.Markdown("### Vaccinazione")
         solara.Select(label="Metodo", value=sim_params.value["vax_strat"], values=["none", "random", "targeted"],
-                      on_value=lambda v: sim_params.set({**sim_params.value, "vax_strat": v}))
+                      on_value=lambda v: sim_params.set({**sim_params.value, "vax_strat": v}), disabled=is_busy)
         solara.SliderFloat(label="% Vaccinati", value=sim_params.value["vax_pct"], min=0.0, max=0.9, step=0.1,
-                           on_value=lambda v: sim_params.set({**sim_params.value, "vax_pct": v}))
+                           on_value=lambda v: sim_params.set({**sim_params.value, "vax_pct": v}), disabled=is_busy)
 
         solara.Markdown("---")
         solara.Button("Avvia Simulazione LIVE", on_click=start_simulation_wrapper, color="primary",
-                      disabled=is_running.value, style={"width": "100%", "margin-bottom": "10px"})
+                      disabled=is_busy, style={"width": "100%", "margin-bottom": "10px"})
         solara.Button("Avvia Analisi di Raggiungibilità", on_click=run_reachability_analysis, color="warning",
-                      style={"width": "100%"})
+                      disabled=is_busy, style={"width": "100%"})
 
         if last_save_msg.value:
             solara.Success(last_save_msg.value)
@@ -302,13 +365,15 @@ def Dashboard():
                     label="Numero di Run", 
                     value=stochastic_params.value["runs"], 
                     min=10, max=200, step=10, 
-                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "runs": v})
+                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "runs": v}),
+                    disabled=is_busy
                 )
                 solara.SliderInt(
                     label="Soglia Infetti (Threshold)", 
                     value=stochastic_params.value["threshold"], 
                     min=1, max=sim_params.value["N"], 
-                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "threshold": v})
+                    on_value=lambda v: stochastic_params.set({**stochastic_params.value, "threshold": v}),
+                    disabled=is_busy
                 )
                 
                 if stochastic_results.value is not None:
@@ -332,6 +397,61 @@ def Dashboard():
                     solara.FigureMatplotlib(fig3)
                 else:
                     solara.Info("Premi 'Avvia Analisi di Raggiungibilità' per generare il calcolo di probabilità e l'istogramma.")
+
+            # --- TAB 3: SWEEP ---
+            with solara.lab.Tab("Parameter Sweep"):
+                solara.Markdown("### Impostazioni Parameter Sweep")
+                
+                solara.Select(
+                    label="Parametro da Variare",
+                    value=sweep_params.value["parameter"],
+                    values=["beta", "gamma", "prob_symp", "vax_pct"],
+                    on_value=lambda v: sweep_params.set({**sweep_params.value, "parameter": v}),
+                    disabled=is_busy
+                )
+
+                solara.SliderFloat(
+                    label="Valore Iniziale",
+                    value=sweep_params.value["start"],
+                    min=0.0, max=1.0, step=0.05,
+                    on_value=lambda v: sweep_params.set({**sweep_params.value, "start": v}),
+                    disabled=is_busy
+                )
+                solara.SliderFloat(
+                    label="Valore Finale",
+                    value=sweep_params.value["end"],
+                    min=0.0, max=1.0, step=0.05,
+                    on_value=lambda v: sweep_params.set({**sweep_params.value, "end": v}),
+                    disabled=is_busy
+                )
+                solara.SliderInt(
+                    label="Numero di Step",
+                    value=sweep_params.value["num_steps"],
+                    min=5, max=50,
+                    on_value=lambda v: sweep_params.set({**sweep_params.value, "num_steps": v}),
+                    disabled=is_busy
+                )
+                
+                solara.Button("Avvia Parameter Sweep", on_click=run_parameter_sweep, color="secondary",
+                              disabled=is_busy, style={"width": "100%", "margin-bottom": "10px"})
+
+                if sweep_results.value:
+                    res = sweep_results.value
+                    param_name = sweep_params.value["parameter"]
+                    
+                    x_values = [r[0] for r in res]
+                    y_values = [r[1] for r in res]
+                    
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.plot(x_values, y_values, marker='o', linestyle='-', color='teal')
+                    ax.set_title(f"Impatto di '{param_name.capitalize()}' sul Picco di Infezioni", pad=20)
+                    ax.set_xlabel(f"Valore di {param_name.capitalize()}")
+                    ax.set_ylabel("Picco Massimo di Infetti")
+                    ax.grid(True, alpha=0.5, linestyle='--')
+                    ax.set_ylim(bottom=0)
+                    solara.FigureMatplotlib(fig)
+                else:
+                    solara.Info("Premi 'Avvia Parameter Sweep' per generare il grafico di analisi.", margin=2)
 
 
 @solara.component

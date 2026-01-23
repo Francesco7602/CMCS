@@ -20,6 +20,7 @@ class VirusAgent(Agent):
         self.prob_symptomatic = prob_symptomatic
         self.incubation_period = max(1, int(self.random.gauss(incubation_mean, 1)))
         self.days_exposed = 0
+        self.community = None
 
     def step_sensing(self):
         self._next_state = self.state
@@ -46,7 +47,7 @@ class VirusAgent(Agent):
         # Tutti gli altri si muovono (se non in lockdown/distanziamento).
         if self.state != STATE_INFECTED_SYMPTOMATIC:
             if isinstance(self.model.grid, MultiGrid):
-                if self.random.random() > self.model.social_distancing:
+                if self.random.random() > self.model.get_social_distancing(self):
                     self.move_candidate()
 
     def step_apply(self):
