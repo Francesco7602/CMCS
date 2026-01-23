@@ -19,15 +19,21 @@ class VirusModel(Model):
     def __init__(self, N=300, width=20, height=20,
                  beta=0.5, gamma=0.1, incubation_mean=3,
                  topology="grid",
+                 ws_k=4, ws_p=0.1, er_p=0.1, comm_l=5, comm_k=20,
                  vaccine_strategy="none", vaccine_pct=0.0,
                  scheduler_type="random",
                  prob_symptomatic=0.6):
 
         super().__init__()
-        self.N = N
+        
+        self.topology = topology
+        if topology == "communities":
+            self.N = comm_l * comm_k
+        else:
+            self.N = N
+
         self.width = width
         self.height = height
-        self.topology = topology
         self.scheduler_type = scheduler_type
         self.steps_count = 0
         self.incubation_mean = incubation_mean
@@ -35,17 +41,24 @@ class VirusModel(Model):
         self.lockdown_active = False
         self.prob_symptomatic = prob_symptomatic
 
-        if topology == "network":
-            self.G = nx.barabasi_albert_graph(N, 5)
+        if topology in ["network", "watts_strogatz", "erdos_renyi", "communities"]:
+            if topology == "watts_strogatz":
+                self.G = nx.watts_strogatz_graph(self.N, k=ws_k, p=ws_p)
+            elif topology == "erdos_renyi":
+                self.G = nx.erdos_renyi_graph(self.N, p=er_p)
+            elif topology == "communities":
+                self.G = nx.connected_caveman_graph(l=comm_l, k=comm_k)
+            else:  # Default to Barabasi-Albert
+                self.G = nx.barabasi_albert_graph(self.N, 5)
             self.grid = NetworkGrid(self.G)
         else:
             self.G = None
             self.grid = MultiGrid(width, height, torus=True)
 
-        for i in range(N):
+        for i in range(self.N):
             a = VirusAgent(self, beta, gamma, incubation_mean, prob_symptomatic)
             self.agents.add(a)
-            if topology == "network":
+            if self.G is not None:
                 self.grid.place_agent(a, i)
             else:
                 x = self.random.randrange(width)
@@ -76,7 +89,7 @@ class VirusModel(Model):
         targets = []
         if strategy == "random":
             targets = self.random.sample(list(self.agents), num_vax)
-        elif strategy == "targeted" and self.topology == "network":
+        elif strategy == "targeted" and self.G is not None:
             degrees = dict(self.G.degree())
             sorted_nodes = sorted(degrees, key=degrees.get, reverse=True)
             top_nodes = sorted_nodes[:num_vax]

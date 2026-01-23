@@ -33,6 +33,11 @@ sim_params = solara.reactive({
     "beta": 0.6,
     "gamma": 0.1,
     "topology": "grid",
+    "ws_k": 4,
+    "ws_p": 0.1,
+    "er_p": 0.1,
+    "comm_l": 5,
+    "comm_k": 20,
     "vax_strat": "none",
     "vax_pct": 0.0,
     "scheduler": "simultaneous",
@@ -63,28 +68,32 @@ async def run_simulation():
     INCUBATION_MEAN = 3
     sigma = 1.0 / INCUBATION_MEAN
 
-    # ODE
-    y0 = (p["N"] - 1, 1, 0, 0)
-    t_ode = np.linspace(0, STEPS, STEPS)
-    ret = odeint(seir_ode, y0, t_ode, args=(p["N"], p["beta"], sigma, p["gamma"]))
-    ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
-    ode_data.set(ode_curr)
-    
-    # Gillespie (run in executor to not block)
-    loop = asyncio.get_running_loop()
-    gillespie_df = await loop.run_in_executor(None, run_gillespie_simulation, p["N"], p["beta"], p["gamma"], sigma, STEPS)
-    gillespie_data.set(gillespie_df)
 
     # Modello ABM
     model = VirusModel(N=p["N"], width=p["grid_size"], height=p["grid_size"],
                        beta=p["beta"], gamma=p["gamma"], incubation_mean=INCUBATION_MEAN,
                        topology=p["topology"],
+                       ws_k=p["ws_k"], ws_p=p["ws_p"], er_p=p["er_p"],
+                       comm_l=p["comm_l"], comm_k=p["comm_k"],
                        vaccine_strategy=p["vax_strat"],
                        vaccine_pct=p["vax_pct"],
                        scheduler_type=p["scheduler"],
                        prob_symptomatic=p["prob_symp"])
-
+    
     model_instance.set(model)
+    
+    # ODE & Gillespie con N corretto dal modello
+    CORRECT_N = model.N
+    y0 = (CORRECT_N - 1, 1, 0, 0)
+    t_ode = np.linspace(0, STEPS, STEPS)
+    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
+    ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
+    ode_data.set(ode_curr)
+    
+    loop = asyncio.get_running_loop()
+    gillespie_df = await loop.run_in_executor(None, run_gillespie_simulation, CORRECT_N, p["beta"], p["gamma"], sigma, STEPS)
+    gillespie_data.set(gillespie_df)
+
     run_data.set(pd.DataFrame(columns=SHORT_LABELS + ["Lockdown"]))
 
     for i in range(STEPS):
@@ -119,6 +128,8 @@ def run_reachability_analysis():
         m = VirusModel(N=sim_p["N"], width=20, height=20,
                        beta=sim_p["beta"], gamma=sim_p["gamma"], incubation_mean=3,
                        topology=sim_p["topology"],
+                       ws_k=sim_p["ws_k"], ws_p=sim_p["ws_p"], er_p=sim_p["er_p"],
+                       comm_l=sim_p["comm_l"], comm_k=sim_p["comm_k"],
                        vaccine_strategy=sim_p["vax_strat"], vaccine_pct=sim_p["vax_pct"],
                        scheduler_type="random", prob_symptomatic=sim_p["prob_symp"])
         
@@ -154,11 +165,32 @@ def Dashboard():
     
     with solara.Sidebar():
         solara.Markdown("## Parametri Simulazione")
-        solara.SliderInt(label="Popolazione (N)", value=sim_params.value["N"], min=50, max=1000, step=50, on_value=lambda v: sim_params.set({**sim_params.value, "N": v}))
+
+        is_communities = sim_params.value["topology"] == "communities"
+        
+        solara.SliderInt(label="Popolazione (N)", value=sim_params.value["N"], min=50, max=1000, step=50, 
+                        on_value=lambda v: sim_params.set({**sim_params.value, "N": v}),
+                        disabled=is_communities)
+        
         solara.SliderInt(label="Durata (steps)", value=sim_params.value["steps"], min=20, max=500, step=10, on_value=lambda v: sim_params.set({**sim_params.value, "steps": v}))
         solara.SliderInt(label="Dimensione Griglia", value=sim_params.value["grid_size"], min=10, max=100, step=5, on_value=lambda v: sim_params.set({**sim_params.value, "grid_size": v}))
-        solara.Select(label="Topologia", value=sim_params.value["topology"], values=["grid", "network"],
+        
+        solara.Select(label="Topologia", value=sim_params.value["topology"], values=["grid", "network", "watts_strogatz", "erdos_renyi", "communities"],
                       on_value=lambda v: sim_params.set({**sim_params.value, "topology": v}))
+        
+        if sim_params.value["topology"] == "watts_strogatz":
+            solara.SliderInt(label="Watts-Strogatz K", value=sim_params.value["ws_k"], min=2, max=20, on_value=lambda v: sim_params.set({**sim_params.value, "ws_k": v}))
+            solara.SliderFloat(label="Watts-Strogatz P", value=sim_params.value["ws_p"], min=0.0, max=1.0, step=0.05, on_value=lambda v: sim_params.set({**sim_params.value, "ws_p": v}))
+
+        if sim_params.value["topology"] == "erdos_renyi":
+            solara.SliderFloat(label="Erdos-Renyi P", value=sim_params.value["er_p"], min=0.0, max=0.2, step=0.01, on_value=lambda v: sim_params.set({**sim_params.value, "er_p": v}))
+
+        if is_communities:
+            solara.SliderInt(label="Numero Comunità (L)", value=sim_params.value["comm_l"], min=2, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_l": v}))
+            solara.SliderInt(label="Dimensione Comunità (K)", value=sim_params.value["comm_k"], min=5, max=50, on_value=lambda v: sim_params.set({**sim_params.value, "comm_k": v}))
+            total_n = sim_params.value["comm_l"] * sim_params.value["comm_k"]
+            solara.Info(f"Popolazione totale (N = L*K): {total_n}")
+
         solara.Select(label="Scheduler", value=sim_params.value["scheduler"], values=["random", "simultaneous"],
                       on_value=lambda v: sim_params.set({**sim_params.value, "scheduler": v}))
         solara.SliderFloat(label="Beta (Contagio)", value=sim_params.value["beta"], min=0.1, max=1.0, step=0.05,
@@ -231,7 +263,7 @@ def Dashboard():
                         # --- GRAFICO 2 (GRIGLIA/RETE) ---
                         with solara.Column():
                             fig2, ax2 = plt.subplots(figsize=(6, 5))
-                            if model.topology == "network":
+                            if model.G is not None:
                                 colors = [AGENT_COLORS[a.state] for a in model.agents]
                                 pos = nx.spring_layout(model.G, seed=42)
                                 nx.draw(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors, width=0.2)
