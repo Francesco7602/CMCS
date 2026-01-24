@@ -21,6 +21,7 @@ class VirusAgent(Agent):
         self.incubation_period = max(1, int(self.random.gauss(incubation_mean, 1)))
         self.days_exposed = 0
         self.community = None
+        self._neighbors = None
 
     def step_sensing(self):
         self._next_state = self.state
@@ -51,6 +52,21 @@ class VirusAgent(Agent):
                     self.move_candidate()
 
     def step_apply(self):
+        if self.state != self._next_state:
+            # Decrement counter for old state
+            if self.state == STATE_SUSCEPTIBLE: self.model.s_count -= 1
+            elif self.state == STATE_EXPOSED: self.model.e_count -= 1
+            elif self.state == STATE_INFECTED_ASYMPTOMATIC: self.model.i_asymp_count -= 1
+            elif self.state == STATE_INFECTED_SYMPTOMATIC: self.model.i_symp_count -= 1
+            elif self.state == STATE_RECOVERED: self.model.r_count -= 1
+            
+            # Increment counter for new state
+            if self._next_state == STATE_SUSCEPTIBLE: self.model.s_count += 1
+            elif self._next_state == STATE_EXPOSED: self.model.e_count += 1
+            elif self._next_state == STATE_INFECTED_ASYMPTOMATIC: self.model.i_asymp_count += 1
+            elif self._next_state == STATE_INFECTED_SYMPTOMATIC: self.model.i_symp_count += 1
+            elif self._next_state == STATE_RECOVERED: self.model.r_count += 1
+
         self.state = self._next_state
 
     def step_sequential(self):
@@ -58,13 +74,14 @@ class VirusAgent(Agent):
         self.step_apply()
 
     def check_exposure(self):
-        if isinstance(self.model.grid, NetworkGrid):
-            neighbor_nodes = list(self.model.grid.G.neighbors(self.pos))
-            neighbors = self.model.grid.get_cell_list_contents(neighbor_nodes)
-        else:
-            neighbors = self.model.grid.get_neighbors(self.pos, moore=True, include_center=False)
+        if self._neighbors is None:
+            if isinstance(self.model.grid, NetworkGrid):
+                neighbor_nodes = list(self.model.grid.G.neighbors(self.pos))
+                self._neighbors = self.model.grid.get_cell_list_contents(neighbor_nodes)
+            else:
+                self._neighbors = self.model.grid.get_neighbors(self.pos, moore=True, include_center=False)
 
-        for neighbor in neighbors:
+        for neighbor in self._neighbors:
             if neighbor.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC]:
                 if self.random.random() < self.beta:
                     return True

@@ -21,10 +21,11 @@ class VirusModel(Model):
     def __init__(self, N=300, width=20, height=20,
                  beta=0.5, gamma=0.1, incubation_mean=3,
                  topology="grid",
-                 ws_k=4, ws_p=0.1, er_p=0.1, comm_l=5, comm_k=20,
+                 ws_k=4, ws_p=0.1, er_p=0.1, ba_m=2, comm_l=5, comm_k=20,
                  vaccine_strategy="none", vaccine_pct=0.0,
                  scheduler_type="random",
-                 prob_symptomatic=0.6):
+                 prob_symptomatic=0.6,
+                 lockdown_threshold_pct=0.2, lockdown_max_sd=0.9, lockdown_active_threshold=0.1):
 
         super().__init__()
         
@@ -38,10 +39,21 @@ class VirusModel(Model):
         self.height = height
         self.scheduler_type = scheduler_type
         self.steps_count = 0
+        self.beta = beta
+        self.gamma = gamma
         self.incubation_mean = incubation_mean
         self.social_distancing = 0.0
         self.lockdown_active = False
         self.prob_symptomatic = prob_symptomatic
+        self.lockdown_threshold_pct = lockdown_threshold_pct
+        self.lockdown_max_sd = lockdown_max_sd
+        self.lockdown_active_threshold = lockdown_active_threshold
+
+        self.s_count = 0
+        self.e_count = 0
+        self.i_asymp_count = 0
+        self.i_symp_count = 0
+        self.r_count = 0
 
         self.communities = None
         self.community_social_distancing = {}
@@ -57,7 +69,7 @@ class VirusModel(Model):
                 for i, comm in enumerate(self.communities):
                     self.community_social_distancing[i] = 0.0
             else:  # Default to Barabasi-Albert
-                self.G = nx.barabasi_albert_graph(self.N, 5)
+                self.G = nx.barabasi_albert_graph(self.N, ba_m)
             self.grid = NetworkGrid(self.G)
         else:
             self.G = None
@@ -85,13 +97,18 @@ class VirusModel(Model):
             patient_zero = self.random.choice(susceptible_agents)
             patient_zero.state = STATE_EXPOSED
 
+        for a in self.agents:
+            if a.state == STATE_SUSCEPTIBLE: self.s_count += 1
+            elif a.state == STATE_EXPOSED: self.e_count += 1
+            elif a.state == STATE_RECOVERED: self.r_count += 1
+            
         self.datacollector = DataCollector(
             model_reporters={
-                "S": lambda m: sum(1 for a in m.agents if a.state == STATE_SUSCEPTIBLE),
-                "E": lambda m: sum(1 for a in m.agents if a.state == STATE_EXPOSED),
-                "I_asymp": lambda m: sum(1 for a in m.agents if a.state == STATE_INFECTED_ASYMPTOMATIC),
-                "I_symp": lambda m: sum(1 for a in m.agents if a.state == STATE_INFECTED_SYMPTOMATIC),
-                "R": lambda m: sum(1 for a in m.agents if a.state == STATE_RECOVERED),
+                "S": lambda m: m.s_count,
+                "E": lambda m: m.e_count,
+                "I_asymp": lambda m: m.i_asymp_count,
+                "I_symp": lambda m: m.i_symp_count,
+                "R": lambda m: m.r_count,
                 "Lockdown": lambda m: 1 if m.lockdown_active else 0
             }
         )
@@ -119,16 +136,16 @@ class VirusModel(Model):
                 comm_agents = self.grid.get_cell_list_contents(list(comm))
                 infected_detected = sum(1 for a in comm_agents if a.state == STATE_INFECTED_SYMPTOMATIC)
                 pct_detected = infected_detected / len(comm_agents)
-                self.community_social_distancing[i] = min(0.9, (pct_detected / 0.2) * 0.9)
-                if self.community_social_distancing[i] > 0.1:
+                self.community_social_distancing[i] = min(self.lockdown_max_sd, (pct_detected / self.lockdown_threshold_pct) * self.lockdown_max_sd)
+                if self.community_social_distancing[i] > self.lockdown_active_threshold:
                     self.lockdown_active = True
         else:
-            infected_detected = sum(1 for a in self.agents if a.state == STATE_INFECTED_SYMPTOMATIC)
+            infected_detected = self.i_symp_count
             pct_detected = infected_detected / self.N
 
             # Adaptive lockdown
-            self.social_distancing = min(0.9, (pct_detected / 0.2) * 0.9)
-            if self.social_distancing > 0.1:
+            self.social_distancing = min(self.lockdown_max_sd, (pct_detected / self.lockdown_threshold_pct) * self.lockdown_max_sd)
+            if self.social_distancing > self.lockdown_active_threshold:
                 self.lockdown_active = True
             else:
                 self.lockdown_active = False
