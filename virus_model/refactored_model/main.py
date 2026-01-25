@@ -1,243 +1,459 @@
 # virus_model/refactored_model/main.py
-# python -m solara run virus_model.refactored_model.main
+"""The slides provide a hierarchy that explains this perfectly:
+
+    Petri Nets are a Modelling Language (a way to write down the rules).
+
+    Transition Systems are a Model of Behavior (the resulting graph of all possible states).
+
+Transition System (The "State Graph")
+
+A Transition System is a graph where each node represents the entire state of the world at a specific moment.
+
+    In your model: A single state in a Transition System would be the tuple: s=(S=490,E=5,I=5,R=0).
+
+    The Arrow: A transition arrow would connect that state to a completely different state node, e.g., s′=(S=489,E=6,I=5,R=0).
+
+    The Problem: Because you have N=500 agents, the number of possible states is massive (combinatorial explosion). Drawing a Transition System for your virus model would result in a graph with millions of nodes that is impossible to read.
+
+Petri Net (The "Rules Diagram")
+
+A Petri Net is a compact way to describe how parts of the state interact.
+
+    Places (Circles): These represent local states or "buckets" (Susceptible, Exposed, Infected, Recovered).
+
+    Tokens (Numbers/Dots): These represent the agents. The "State" of the system is defined by how many tokens are in each place.
+
+    Transitions (Rectangles): These represent the events (Infection β, Progression σ, Recovery γ) that move tokens from one place to another."""
 import solara
 import solara.lab
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
+import pandas as pd
+import asyncio
+import networkx as nx
 from scipy.integrate import odeint
-import threading
-
-from mesa.visualization import SolaraViz
-from mesa.visualization.components.matplotlib_components import make_mpl_space_component
-from mesa.model import Model
-from mesa.visualization.utils import update_counter
 
 from .constants import (
-    AGENT_COLORS,
-    STATE_INFECTED_ASYMPTOMATIC,
-    STATE_INFECTED_SYMPTOMATIC,
+    STATE_EMPTY, SHORT_LABELS, AGENT_COLORS, GRID_CMAP, OUTPUT_DIR,
+    STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC,
 )
 from .ode import seir_ode
 from .model import VirusModel
-from .plotting import draw_petri_net, save_batch_results_plot
+from .plotting import save_single_run_results, save_batch_results_plot, draw_petri_net
 from .gillespie import run_gillespie_simulation
 
-# --------------------------------------------------------------------------------
-# --- Modello Esteso per Integrazione con Mesa/Solara ---
-# --------------------------------------------------------------------------------
+# --- GESTIONE STATO REATTIVO (SOLARA) ---
 
-class SolaraVirusModel(VirusModel):
-    """
-    Un'estensione del modello VirusModel per integrarsi meglio con SolaraViz.
-    Aggiunge il calcolo dei dati di confronto (ODE/Gillespie) e gestisce
-    il ciclo di vita della simulazione.
-    """
-    def __init__(self, max_steps=100, **kwargs):
-        super().__init__(**kwargs)
-        self.max_steps = max_steps
-        self.ode_data = None
-        self.gillespie_data = None
-        self.gillespie_thread = None
+# Tutti i parametri del modello ora sono qui
+sim_params = solara.reactive({
+    "N": 500,
+    "steps": 100,
+    "grid_size": 30,
+    # Epidemiologia
+    "beta": 0.6,
+    "gamma": 0.1,
+    "prob_symp": 0.6,
+    "incubation_mean": 3,
+    # Topologia
+    "topology": "grid",
+    "ws_k": 4, "ws_p": 0.1,
+    "er_p": 0.1,
+    "ba_m": 2,
+    "comm_l": 5, "comm_k": 20,
+    # Interventi
+    "vax_strat": "none",
+    "vax_pct": 0.0,
+    "lockdown_enabled": False,  # Nuovo toggle UI
+    "lockdown_thresh": 0.2,  # % popolazione infetta per attivare
+    "lockdown_max_sd": 0.8,  # Distanziamento massimo
+    # Sistema
+    "scheduler": "simultaneous",
+})
 
-    @property
-    def steps(self):
-        """
-        Returns the current step count from the scheduler.
-        Returns 0 if the scheduler has not been initialized yet.
-        """
-        if hasattr(self, "schedule"):
-            return self.schedule.steps
-        return 0
+stochastic_params = solara.reactive({
+    "runs": 50,
+    "threshold": 150,
+})
 
-    @steps.setter
-    def steps(self, value):
-        """
-        Setter for the 'steps' property.
-        This is required to avoid an AttributeError during model initialization,
-        as the parent mesa.Model class attempts to set self.steps = 0.
-        We can safely ignore the value being set.
-        """
-        pass
+sweep_params = solara.reactive({
+    "parameter": "beta",
+    "start": 0.1,
+    "end": 1.0,
+    "num_steps": 10,
+})
 
-    def step(self):
-        """Avanza il modello di uno step e gestisce la fine della simulazione."""
-        if self.steps_count >= self.max_steps:
-            self.running = False
-            return
-        
-        # Al primo step, avvia i calcoli di confronto
-        if self.steps_count == 1:
-            self._calculate_comparison_data()
-            
-        super().step()
+# Stati Risultati
+model_instance = solara.reactive(None)
+run_data = solara.reactive(None)
+ode_data = solara.reactive(None)
+gillespie_data = solara.reactive(None)
+stochastic_results = solara.reactive(None)
+sweep_results = solara.reactive(None)
 
-    def _calculate_comparison_data(self):
-        """Calcola i dati per ODE e (in un thread separato) per Gillespie."""
-        CORRECT_N = self.N
-        y0 = (CORRECT_N - 1, 1, 0, 0)
-        t_ode = np.linspace(0, self.max_steps, self.max_steps)
-        sigma = 1.0 / self.incubation_mean
-        
-        # ODE (veloce, eseguito direttamente)
-        ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, self.beta, sigma, self.gamma))
-        self.ode_data = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
-        
-        # Gillespie (lento, eseguito in un thread per non bloccare l'UI)
-        self.gillespie_thread = threading.Thread(
-            target=self._run_gillespie_in_background,
-            args=(CORRECT_N, self.beta, self.gamma, sigma, self.max_steps)
+# Stati Interfaccia
+is_running = solara.reactive(False)
+is_analyzing = solara.reactive(False)
+is_sweeping = solara.reactive(False)
+status_msg = solara.reactive("")
+
+
+# --- LOGICA SIMULAZIONE ---
+
+async def run_live_simulation():
+    """Esegue una simulazione live (Tab 1)."""
+    if is_running.value: return
+    is_running.set(True)
+    status_msg.set("")
+
+    p = sim_params.value
+    steps = p["steps"]
+    sigma = 1.0 / p["incubation_mean"]
+
+    # 1. Inizializza Modello con TUTTI i parametri
+    model = VirusModel(
+        N=p["N"], width=p["grid_size"], height=p["grid_size"],
+        beta=p["beta"], gamma=p["gamma"], incubation_mean=p["incubation_mean"],
+        topology=p["topology"],
+        ws_k=p["ws_k"], ws_p=p["ws_p"], er_p=p["er_p"], ba_m=p["ba_m"],
+        comm_l=p["comm_l"], comm_k=p["comm_k"],
+        vaccine_strategy=p["vax_strat"], vaccine_pct=p["vax_pct"],
+        scheduler_type=p["scheduler"], prob_symptomatic=p["prob_symp"],
+        # Parametri Lockdown (passiamo valori fittizi se disabilitato)
+        lockdown_threshold_pct=p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
+        lockdown_max_sd=p["lockdown_max_sd"] if p["lockdown_enabled"] else 0.0,
+        lockdown_active_threshold=0.05
+    )
+    model_instance.set(model)
+
+    # 2. ODE & Gillespie (Background)
+    CORRECT_N = model.N
+    y0 = (CORRECT_N - 1, 1, 0, 0)  # S, E, I, R
+    t_ode = np.linspace(0, steps, steps)
+
+    # ODE
+    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
+    ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
+    ode_data.set(ode_curr)
+
+    # Gillespie
+    loop = asyncio.get_running_loop()
+    g_df = await loop.run_in_executor(None, run_gillespie_simulation, CORRECT_N, p["beta"], p["gamma"], sigma, steps)
+    gillespie_data.set(g_df)
+
+    # 3. ABM Loop
+    for i in range(steps):
+        model.step()
+        model_instance.set(model)
+        df = model.datacollector.get_model_vars_dataframe()
+        run_data.set(df)
+        await asyncio.sleep(0.01)  # Velocità animazione
+
+    try:
+        save_single_run_results(model, df, ode_curr, g_df)
+        status_msg.set(f"✅ Run salvata in {OUTPUT_DIR}")
+    except Exception as e:
+        status_msg.set(f"⚠️ Errore salvataggio: {e}")
+
+    is_running.set(False)
+
+
+def run_batch_analysis():
+    """Esegue batch analysis (Tab 2)."""
+    if is_analyzing.value: return
+    is_analyzing.set(True)
+    stochastic_results.set(None)
+    status_msg.set(f"Batch run ({stochastic_params.value['runs']} iterazioni)...")
+
+    p = sim_params.value
+    sp = stochastic_params.value
+    peaks = []
+    exceeded = 0
+
+    for i in range(sp["runs"]):
+        # Modello "leggero" per performance
+        m = VirusModel(
+            N=p["N"], width=20, height=20,
+            beta=p["beta"], gamma=p["gamma"], incubation_mean=3,
+            topology=p["topology"], ws_k=p["ws_k"], ws_p=p["ws_p"], er_p=p["er_p"],
+            comm_l=p["comm_l"], comm_k=p["comm_k"],
+            vaccine_strategy=p["vax_strat"], vaccine_pct=p["vax_pct"],
+            scheduler_type="random", prob_symptomatic=p["prob_symp"]
         )
-        self.gillespie_thread.start()
 
-    def _run_gillespie_in_background(self, *args):
-        """Wrapper per eseguire Gillespie e salvare il risultato."""
-        self.gillespie_data = run_gillespie_simulation(*args)
+        local_peak = 0
+        crossed = False
+        for _ in range(p["steps"]):
+            m.step()
+            inf = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
+            if inf > local_peak: local_peak = inf
+            if inf > sp["threshold"]: crossed = True
 
-# --------------------------------------------------------------------------------
-# --- Configurazione Visualizzazione Mesa ---
-# --------------------------------------------------------------------------------
+        peaks.append(local_peak)
+        if crossed: exceeded += 1
 
-def agent_portrayal(agent):
-    """Specifica come disegnare ogni agente sulla griglia."""
-    if agent is None:
-        return
-    return {
-        "color": AGENT_COLORS[agent.state],
-        "size": 50,
-        "marker": "o",
-    }
+    stochastic_results.set({"peaks": peaks, "probability": exceeded / sp["runs"]})
+    is_analyzing.set(False)
+    status_msg.set("✅ Batch completato.")
 
-model_params = {
-    "N": {"type": "SliderInt", "value": 500, "min": 50, "max": 1000, "step": 50, "label": "Popolazione (N)"},
-    "max_steps": {"type": "SliderInt", "value": 100, "min": 20, "max": 500, "step": 10, "label": "Durata (steps)"},
-    "width": {"type": "SliderInt", "value": 30, "min": 10, "max": 100, "step": 5, "label": "Grid Width"},
-    "height": {"type": "SliderInt", "value": 30, "min": 10, "max": 100, "step": 5, "label": "Grid Height"},
-    "beta": {"type": "SliderFloat", "value": 0.6, "min": 0.1, "max": 1.0, "step": 0.05, "label": "Beta (Contagio)"},
-    "gamma": {"type": "SliderFloat", "value": 0.1, "min": 0.05, "max": 0.5, "step": 0.01, "label": "Gamma (Guarigione)"},
-    "incubation_mean": {"type": "SliderInt", "value": 3, "min": 1, "max": 10, "label": "Periodo Incubazione"},
-    "prob_symptomatic": {"type": "SliderFloat", "value": 0.6, "min": 0.0, "max": 1.0, "step": 0.1, "label": "Prob. Sintomi"},
-    "topology": {"type": "Select", "value": "grid", "values": ["grid", "network", "watts_strogatz", "erdos_renyi", "communities"], "label": "Topologia"},
-    "ws_k": {"type": "SliderInt", "value": 4, "min": 2, "max": 20, "label": "Watts-Strogatz K"},
-    "ws_p": {"type": "SliderFloat", "value": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "label": "Watts-Strogatz P"},
-    "er_p": {"type": "SliderFloat", "value": 0.1, "min": 0.0, "max": 0.2, "step": 0.01, "label": "Erdos-Renyi P"},
-    "ba_m": {"type": "SliderInt", "value": 2, "min": 1, "max": 10, "label": "Barabasi-Albert M"},
-    "comm_l": {"type": "SliderInt", "value": 5, "min": 2, "max": 50, "label": "Num Comunità (L)"},
-    "comm_k": {"type": "SliderInt", "value": 20, "min": 5, "max": 50, "label": "Dim Comunità (K)"},
-    "vaccine_strategy": {"type": "Select", "value": "none", "values": ["none", "random", "targeted"], "label": "Strategia Vaccino"},
-    "vaccine_pct": {"type": "SliderFloat", "value": 0.0, "min": 0.0, "max": 0.9, "step": 0.1, "label": "% Vaccinati"},
-    "scheduler_type": {"type": "Select", "value": "simultaneous", "values": ["random", "simultaneous"], "label": "Scheduler"},
-}
 
-# --------------------------------------------------------------------------------
-# --- Componenti di Visualizzazione Custom ---
-# --------------------------------------------------------------------------------
+def run_parameter_sweep():
+    """Esegue parameter sweep (Tab 3)."""
+    if is_sweeping.value: return
+    is_sweeping.set(True)
+    sweep_results.set(None)
+    status_msg.set("Sweep in corso...")
 
-@solara.component
-def seir_curves_plot(model: Model, steps: int):
-    """Componente per visualizzare le curve SEIR (ABM, ODE, Gillespie)."""
-    update_counter.get() # Ensure reactivity
-    
-    fig, ax = plt.subplots(figsize=(12, 4))
-    df = model.datacollector.get_model_vars_dataframe()
-    
-    if model.ode_data:
-        ode = model.ode_data
-        ax.plot(ode["t"], ode["S"], '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
-        ax.plot(ode["t"], ode["E"], '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
-        ax.plot(ode["t"], ode["I"], '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
-        ax.plot(ode["t"], ode["R"], '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
+    p = sim_params.value
+    sw = sweep_params.value
+    vals = np.linspace(sw["start"], sw["end"], sw["num_steps"])
+    res = []
 
-    if model.gillespie_data is not None:
-        gsp = model.gillespie_data
-        ax.plot(gsp["time"], gsp["S"], ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
-        ax.plot(gsp["time"], gsp["E"], ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
-        ax.plot(gsp["time"], gsp["I"], ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
-        ax.plot(gsp["time"], gsp["R"], ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
-    elif model.steps_count > 1:
-        ax.text(0.5, 0.5, 'Gillespie data is loading...', horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+    for val in vals:
+        curr_p = p.copy()
+        curr_p[sw["parameter"]] = val
 
-    if not df.empty:
-        ax.plot(df["S"], label="S (ABM)", color=AGENT_COLORS[0])
-        ax.plot(df["E"], label="E (ABM)", color=AGENT_COLORS[1])
-        ax.plot(df["I_asymp"] + df["I_symp"], label="I (ABM)", color=AGENT_COLORS[3])
-        ax.plot(df["R"], label="R (ABM)", color=AGENT_COLORS[4])
+        m = VirusModel(
+            N=curr_p["N"], width=20, height=20,
+            beta=curr_p["beta"], gamma=curr_p["gamma"], incubation_mean=3,
+            topology=curr_p["topology"], ws_k=curr_p["ws_k"], ws_p=curr_p["ws_p"], er_p=curr_p["er_p"],
+            comm_l=curr_p["comm_l"], comm_k=curr_p["comm_k"],
+            vaccine_strategy=curr_p["vax_strat"], vaccine_pct=curr_p["vax_pct"],
+            scheduler_type="random", prob_symptomatic=curr_p["prob_symp"]
+        )
+        peak = 0
+        for _ in range(curr_p["steps"]):
+            m.step()
+            inf = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
+            if inf > peak: peak = inf
+        res.append((val, peak))
 
-    ax.set_title(f"Dinamica SEIR - Step: {model.steps_count}")
-    ax.set_xlim(0, model.max_steps)
-    ax.set_ylim(0, model.N)
-    
-    # Solo se ci sono etichette, crea la legenda
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(loc="upper right", fontsize='x-small', ncol=3)
-        
-    ax.grid(True, alpha=0.3)
+    sweep_results.set(res)
+    is_sweeping.set(False)
+    status_msg.set("✅ Sweep completato.")
 
-    solara.FigureMatplotlib(fig)
-    plt.close(fig)
+
+# --- UI COMPONENTS ---
 
 @solara.component
-def petri_net_plot(model: Model, steps: int):
-    """Componente per visualizzare la Rete di Petri dello stato attuale."""
-    update_counter.get() # Ensure reactivity
-    
-    fig, ax = plt.subplots(figsize=(6, 5))
-    df = model.datacollector.get_model_vars_dataframe()
-    if not df.empty:
-        latest = df.iloc[-1]
-        S, E, I, R = latest["S"], latest["E"], latest["I_asymp"] + latest["I_symp"], latest["R"]
-        draw_petri_net(ax, S, E, I, R)
-    else:
-        if "N" in model_params:
-            draw_petri_net(ax, model_params["N"]["value"] - 1, 1, 0, 0)
-    
-    solara.FigureMatplotlib(fig)
-    plt.close(fig)
+def SidebarParams():
+    """Componente dedicato alla sidebar per pulizia codice."""
+    busy = is_running.value or is_analyzing.value or is_sweeping.value
+    p = sim_params.value
 
-space_component = make_mpl_space_component(agent_portrayal=agent_portrayal)
+    def update(key, val):
+        new_p = p.copy()
+        new_p[key] = val
+        sim_params.set(new_p)
+
+    solara.Markdown("##  Configurazione")
+
+    # 1. GENERALE (Sostituito ExpansionPanel con Details)
+    with solara.Details("Generale", expand=True):
+        solara.SliderInt("Popolazione", value=p["N"], min=50, max=1000, step=50, on_value=lambda v: update("N", v),
+                         disabled=busy)
+        solara.SliderInt("Step Simulazione", value=p["steps"], min=50, max=500, step=10,
+                         on_value=lambda v: update("steps", v), disabled=busy)
+        solara.SliderInt("Griglia (LxL)", value=p["grid_size"], min=10, max=50, step=5,
+                         on_value=lambda v: update("grid_size", v), disabled=busy)
+
+    # 2. EPIDEMIOLOGIA
+    with solara.Details("Epidemiologia", expand=False):
+        solara.SliderFloat("Beta (Contagio)", value=p["beta"], min=0.1, max=1.0, step=0.05,
+                           on_value=lambda v: update("beta", v), disabled=busy)
+        solara.SliderFloat("Gamma (Guarigione)", value=p["gamma"], min=0.05, max=0.5, step=0.01,
+                           on_value=lambda v: update("gamma", v), disabled=busy)
+        solara.SliderFloat("Prob. Sintomi", value=p["prob_symp"], min=0.0, max=1.0, step=0.1,
+                           on_value=lambda v: update("prob_symp", v), disabled=busy)
+        solara.SliderInt("Incubazione Media (gg)", value=p["incubation_mean"], min=1, max=10,
+                         on_value=lambda v: update("incubation_mean", v), disabled=busy)
+
+    # 3. TOPOLOGIA
+    with solara.Details("Rete e Topologia", expand=False):
+        solara.Select("Tipo Topologia", value=p["topology"],
+                      values=["grid", "network", "watts_strogatz", "erdos_renyi", "communities"],
+                      on_value=lambda v: update("topology", v), disabled=busy)
+
+        if p["topology"] == "watts_strogatz":
+            solara.SliderInt("Vicini (k)", value=p["ws_k"], min=2, max=10, on_value=lambda v: update("ws_k", v),
+                             disabled=busy)
+            solara.SliderFloat("Prob. Rewire (p)", value=p["ws_p"], min=0.0, max=1.0, step=0.05,
+                               on_value=lambda v: update("ws_p", v), disabled=busy)
+        elif p["topology"] == "erdos_renyi":
+            solara.SliderFloat("Prob. Link (p)", value=p["er_p"], min=0.0, max=0.2, step=0.01,
+                               on_value=lambda v: update("er_p", v), disabled=busy)
+        elif p["topology"] == "communities":
+            solara.SliderInt("Num. Comunità", value=p["comm_l"], min=2, max=20, on_value=lambda v: update("comm_l", v),
+                             disabled=busy)
+            solara.SliderInt("Dim. Comunità", value=p["comm_k"], min=5, max=50, on_value=lambda v: update("comm_k", v),
+                             disabled=busy)
+
+    # 4. INTERVENTI
+    with solara.Details("Interventi (Vaccini/Lockdown)", expand=False):
+        solara.Select("Strategia Vaccini", value=p["vax_strat"], values=["none", "random", "targeted"],
+                      on_value=lambda v: update("vax_strat", v), disabled=busy)
+        if p["vax_strat"] != "none":
+            solara.SliderFloat("% Vaccinati", value=p["vax_pct"], min=0.0, max=0.9, step=0.1,
+                               on_value=lambda v: update("vax_pct", v), disabled=busy)
+
+        solara.Markdown("---")
+        solara.Checkbox(label="Attiva Lockdown Dinamico", value=p["lockdown_enabled"],
+                        on_value=lambda v: update("lockdown_enabled", v), disabled=busy)
+        if p["lockdown_enabled"]:
+            solara.SliderFloat("Soglia Attivazione (% Infetti)", value=p["lockdown_thresh"], min=0.05, max=0.5,
+                               step=0.05, on_value=lambda v: update("lockdown_thresh", v), disabled=busy)
+            solara.SliderFloat("Max Distanziamento", value=p["lockdown_max_sd"], min=0.1, max=1.0, step=0.1,
+                               on_value=lambda v: update("lockdown_max_sd", v), disabled=busy)
 
 
 @solara.component
-def BottomPlots(model: Model, steps: int):
-    with solara.Columns([1, 1]):
-        space_component(model=model)
-        petri_net_plot(model=model, steps=steps)
+def Dashboard():
+    busy = is_running.value or is_analyzing.value or is_sweeping.value
 
-@solara.component
-def AllPlots(model: Model):
-    with solara.Column(style={"width": "100%"}):
-        seir_curves_plot(model, model.steps)
-        BottomPlots(model, model.steps)
+    with solara.Sidebar():
+        SidebarParams()
+        solara.Markdown("---")
+        if status_msg.value:
+            solara.Info(status_msg.value)
 
-# --------------------------------------------------------------------------------
-# --- Pagina Principale dell'Applicazione ---
-# --------------------------------------------------------------------------------
+    with solara.Column(style={"padding": "20px", "max-width": "1200px", "margin": "0 auto"}):
+        solara.Title("Simulatore CMCS")
 
-# @solara.component
-# def StochasticAnalysisTab(): ... # Lasciato per riferimento futuro
+        with solara.lab.Tabs():
 
-# @solara.component
-# def ParameterSweepTab(): ... # Lasciato per riferimento futuro
+            # --- TAB 1: LIVE ---
+            with solara.lab.Tab("Simulazione & Curve"):
+                with solara.Card():
+                    solara.Button("Avvia Live Run", on_click=lambda: asyncio.create_task(run_live_simulation()),
+                                  color="primary", disabled=busy, style={"width": "100%", "margin-bottom": "15px"})
+
+                    if run_data.value is not None:
+                        df = run_data.value
+                        ode = ode_data.value
+                        gsp = gillespie_data.value
+
+                        # --- GRAFICO DELLE CURVE ---
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        N = model_instance.value.N
+
+                        # 1. Modello ABM (Linee Solide)
+                        ax.plot(df.index, df["S"] / N * 100, label="S (ABM)", color=AGENT_COLORS[0])
+                        ax.plot(df.index, df["E"] / N * 100, label="E (ABM)", color=AGENT_COLORS[1])
+                        ax.plot(df.index, (df["I_asymp"] + df["I_symp"]) / N * 100, label="I (ABM)", color=AGENT_COLORS[3])
+                        ax.plot(df.index, df["R"] / N * 100, label="R (ABM)", color=AGENT_COLORS[4])
+
+                        # 2. ODE (Tratteggiato)
+                        if ode:
+                            ax.plot(ode["t"], ode["S"] / N * 100, '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
+                            ax.plot(ode["t"], ode["E"] / N * 100, '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
+                            ax.plot(ode["t"], ode["I"] / N * 100, '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
+                            ax.plot(ode["t"], ode["R"] / N * 100, '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
+
+                        # 3. Gillespie (Punteggiato)
+                        if gsp is not None:
+                            ax.plot(gsp["time"], gsp["S"] / N * 100, ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
+                            ax.plot(gsp["time"], gsp["E"] / N * 100, ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
+                            ax.plot(gsp["time"], gsp["I"] / N * 100, ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
+                            ax.plot(gsp["time"], gsp["R"] / N * 100, ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
+
+
+                        # 4. Lockdown Area
+                        if "Lockdown" in df.columns:
+                            active = df[df["Lockdown"] == 1]
+                            if not active.empty:
+                                ax.axvspan(active.index[0], active.index[-1], color='gray', alpha=0.2,
+                                           label="Periodo Lockdown")
+
+                        ax.set_title("Dinamica dell'Infezione (ABM vs ODE vs Gillespie)")
+                        ax.set_xlabel("Giorni / Step")
+                        ax.set_ylabel("Popolazione (%)")
+                        ax.set_ylim(0, 100)
+                        ax.legend(loc='upper right', fontsize='small', ncol=2)
+                        ax.grid(True, alpha=0.3)
+                        solara.FigureMatplotlib(fig)
+                        plt.close(fig)
+
+                        # --- VISTE SPAZIALI ---
+                        with solara.Row():
+                            with solara.Column():
+                                solara.Markdown("**Mappa Agenti**")
+                                fig2, ax2 = plt.subplots(figsize=(5, 5))
+                                model = model_instance.value
+                                if model.G:
+                                    pos = nx.spring_layout(model.G, seed=42)
+                                    colors = [AGENT_COLORS[a.state] for a in model.agents]
+                                    nx.draw(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors, width=0.5)
+                                else:
+                                    grid = np.full((model.width, model.height), -1)
+                                    for a in model.agents: grid[a.pos] = a.state
+                                    ax2.imshow(grid, cmap=GRID_CMAP, vmin=-1, vmax=4)
+                                ax2.axis('off')
+                                solara.FigureMatplotlib(fig2)
+                                plt.close(fig2)
+
+                            with solara.Column():
+                                solara.Markdown("**Rete di Petri (Stato Finale)**")
+                                fig3, ax3 = plt.subplots(figsize=(5, 5))
+                                last = df.iloc[-1]
+                                draw_petri_net(ax3, last["S"], last["E"], last["I_asymp"] + last["I_symp"], last["R"])
+                                solara.FigureMatplotlib(fig3)
+                                plt.close(fig3)
+                    else:
+                        solara.Info("Configura i parametri a sinistra e premi 'Avvia Live Run'.")
+
+            # --- TAB 2: BATCH ---
+            with solara.lab.Tab("Analisi Batch"):
+                with solara.Card():
+                    with solara.Row():
+                        solara.InputInt("Numero Run", value=stochastic_params.value["runs"],
+                                        on_value=lambda v: stochastic_params.set(
+                                            {**stochastic_params.value, "runs": v}))
+                        solara.InputInt("Soglia Rischio", value=stochastic_params.value["threshold"],
+                                        on_value=lambda v: stochastic_params.set(
+                                            {**stochastic_params.value, "threshold": v}))
+                    solara.Button("⚡ Avvia Batch", on_click=run_batch_analysis, color="warning", disabled=busy)
+
+                    if stochastic_results.value:
+                        res = stochastic_results.value
+                        peaks = res["peaks"]
+                        solara.Success(f"Probabilità superamento soglia: {res['probability'] * 100:.1f}%")
+                        fig, ax = plt.subplots(figsize=(8, 4))
+                        ax.hist(peaks, bins=15, color="purple", alpha=0.7)
+                        ax.axvline(stochastic_params.value['threshold'], color='r', linestyle='--')
+                        ax.set_title("Distribuzione Picchi Epidemici")
+                        solara.FigureMatplotlib(fig)
+                        plt.close(fig)
+
+            # --- TAB 3: SWEEP ---
+            with solara.lab.Tab("Sweep"):
+                with solara.Card():
+                    solara.Select("Parametro", value=sweep_params.value["parameter"],
+                                  values=["beta", "gamma", "vax_pct", "prob_symp"],
+                                  on_value=lambda v: sweep_params.set({**sweep_params.value, "parameter": v}))
+                    with solara.Row():
+                        solara.InputFloat("Min", value=sweep_params.value["start"],
+                                          on_value=lambda v: sweep_params.set({**sweep_params.value, "start": v}))
+                        solara.InputFloat("Max", value=sweep_params.value["end"],
+                                          on_value=lambda v: sweep_params.set({**sweep_params.value, "end": v}))
+                        solara.InputInt("Steps", value=sweep_params.value["num_steps"],
+                                        on_value=lambda v: sweep_params.set({**sweep_params.value, "num_steps": v}))
+                    solara.Button("🔍 Avvia Sweep", on_click=run_parameter_sweep, color="secondary", disabled=busy)
+
+                    if sweep_results.value:
+                        data = sweep_results.value
+                        fig, ax = plt.subplots(figsize=(8, 4))
+                        ax.plot([x[0] for x in data], [x[1] for x in data], '-o', color='teal')
+                        ax.set_xlabel(sweep_params.value["parameter"])
+                        ax.set_ylabel("Picco Infetti")
+                        ax.grid(True)
+                        solara.FigureMatplotlib(fig)
+                        plt.close(fig)
+
 
 @solara.component
 def Page():
-    """Componente principale che assembla l'interfaccia utente."""
-    solara.Markdown("# Simulatore Epidemiologico con Mesa e Solara")
-
-    # Crea un'istanza iniziale del modello da passare a SolaraViz.
-    # Questo assicura che i componenti ricevano un'istanza valida fin da subito.
-    default_params = {name: options["value"] for name, options in model_params.items()}
-    initial_model = SolaraVirusModel(**default_params)
-
-    # Creiamo i componenti di visualizzazione usando gli helper di Mesa
-    
-    SolaraViz(
-        initial_model,
-        model_params=model_params,
-        components=[
-            (AllPlots, 0),
-        ],
-        name="Simulatore Epidemiologico",
-    )
+    solara.Title("Virus Sim")
+    Dashboard()

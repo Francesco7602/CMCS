@@ -5,9 +5,15 @@ import pandas as pd
 
 def run_gillespie_simulation(N, beta, gamma, sigma, max_steps):
     """
-    Esegue una simulazione SEIR usando l'algoritmo di Gillespie (SSA).
+        Executes a SEIR simulation using the Gillespie Stochastic Simulation Algorithm (SSA).
 
-    Args:
+        KEY DIFFERENCES FROM ODE:
+        1. Discrete Variables: S, E, I, R are integers, not continuous floats.
+        2. Stochastic Time: The time step 'tau' is not fixed; it is generated randomly
+           based on the probability of an event occurring.
+        3. Randomness: Each run produces a unique trajectory.
+
+        Args:
         N (int): Popolazione totale.
         beta (float): Tasso di contagio.
         gamma (float): Tasso di guarigione.
@@ -15,8 +21,8 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps):
         max_steps (int): Numero massimo di step temporali della simulazione ABM/ODE,
                          usato come tempo massimo (t_max).
 
-    Returns:
-        pandas.DataFrame: DataFrame con le colonne ['time', 'S', 'E', 'I', 'R'].
+        Returns:
+            pandas.DataFrame: DataFrame con le colonne ['time', 'S', 'E', 'I', 'R'].
     """
     # Stato iniziale
     S = N - 1
@@ -27,23 +33,30 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps):
 
     # History
     history = {'time': [t], 'S': [S], 'E': [E], 'I': [I], 'R': [R]}
-
+    # Loop until max time/steps or until the epidemic dies out (no Exposed or Infected left)
     while t < max_steps and (E > 0 or I > 0):
-        # 1. Calcolo delle propensities (tassi di reazione)
+        # Calculate Propensities (a_mu)
+        # The propensity a_mu * dt is the probability that reaction mu
+        # occurs in the next infinitesimal time interval dt
         prop_infection = (beta * S * I) / N
         prop_progression = sigma * E
         prop_recovery = gamma * I
-
+        # a_0: Total propensity (sum of all reaction rates)
         total_propensity = prop_infection + prop_progression + prop_recovery
 
         if total_propensity == 0:
             break
 
-        # 2. Calcolo del tempo al prossimo evento (tau)
+        # Determine time to next event (tau)
+        # The time until the next reaction is exponentially distributed
+        # with parameter a_0
+        # Formula: tau = (1/a_0) * ln(1/r1) where r1 is uniform (0,1)
         r1 = np.random.rand()
         tau = (1 / total_propensity) * np.log(1 / r1)
 
-        # 3. Selezione del prossimo evento
+        # Select WHICH reaction occurs
+        # Reaction mu is chosen with probability a_mu / a_0
+        # We use a Monte Carlo selection method
         r2 = np.random.rand()
         event_threshold = r2 * total_propensity
 

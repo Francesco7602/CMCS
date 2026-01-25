@@ -19,36 +19,37 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
     # --- CURVE ---
-    fig1 = plt.figure(figsize=(12, 4))
+    fig1 = plt.figure(figsize=(10, 5))
     ax1 = fig1.add_subplot(111)
 
     if ode_data is not None:
-        ax1.plot(ode_data["t"], ode_data["S"], '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
-        ax1.plot(ode_data["t"], ode_data["E"], '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
-        ax1.plot(ode_data["t"], ode_data["I"], '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
-        ax1.plot(ode_data["t"], ode_data["R"], '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
+        ax1.plot(ode_data["t"], ode_data["S"] / model.N * 100, '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
+        ax1.plot(ode_data["t"], ode_data["E"] / model.N * 100, '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
+        ax1.plot(ode_data["t"], ode_data["I"] / model.N * 100, '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
+        ax1.plot(ode_data["t"], ode_data["R"] / model.N * 100, '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
 
     if gillespie_data is not None:
-        ax1.plot(gillespie_data["time"], gillespie_data["S"], ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["E"], ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["I"], ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["R"], ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["S"] / model.N * 100, ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["E"] / model.N * 100, ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["I"] / model.N * 100, ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["R"] / model.N * 100, ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
 
     if not df.empty:
-        ax1.plot(df.index, df["S"], label="S (ABM)", color=AGENT_COLORS[0])
-        ax1.plot(df.index, df["E"], label="E (ABM)", color=AGENT_COLORS[1])
-        ax1.plot(df.index, df["I_asymp"] + df["I_symp"], label="I (ABM)", color=AGENT_COLORS[3])
-        ax1.plot(df.index, df["R"], label="R (ABM)", color=AGENT_COLORS[4])
+        ax1.plot(df.index, df["S"] / model.N * 100, label="S (ABM)", color=AGENT_COLORS[0])
+        ax1.plot(df.index, df["E"] / model.N * 100, label="E (ABM)", color=AGENT_COLORS[1])
+        ax1.plot(df.index, (df["I_asymp"] + df["I_symp"]) / model.N * 100, label="I (ABM)", color=AGENT_COLORS[3])
+        ax1.plot(df.index, df["R"] / model.N * 100, label="R (ABM)", color=AGENT_COLORS[4])
 
         if "Lockdown" in df.columns:
             lockdown_steps = df[df["Lockdown"] == 1].index
             if len(lockdown_steps) > 0:
                 ax1.axvspan(lockdown_steps[0], lockdown_steps[-1], color='red', alpha=0.1, label="Lockdown")
 
-    ax1.set_title(f"Run Report (ABM vs ODE vs Gillespie) - {timestamp}")
+    ax1.set_title("Run Report (ABM vs ODE vs Gillespie)")
     ax1.set_xlim(0, max(df.index) if not df.empty else 100)
-    ax1.set_ylim(0, model.N)
-    ax1.legend(loc="upper right", fontsize='x-small', ncol=3)
+    ax1.set_ylim(0, 100)
+    ax1.set_ylabel("Popolazione (%)")
+    ax1.legend(loc="best", fontsize='small')
     ax1.grid(True, alpha=0.3)
 
     path_curves = os.path.join(OUTPUT_DIR, f"run_{timestamp}_curves.png")
@@ -59,7 +60,7 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     fig2 = plt.figure(figsize=(6, 5))
     ax2 = fig2.add_subplot(111)
 
-    if model.topology == "network":
+    if model.G is not None:
         colors = [AGENT_COLORS[a.state] for a in model.agents]
         pos = nx.spring_layout(model.G, seed=42)
         nx.draw(model.G, pos=pos, ax=ax2, node_size=50, node_color=colors, width=0.5, edge_color="#CCCCCC")
@@ -111,8 +112,7 @@ def save_batch_results_plot(peaks):
 
 def draw_petri_net(ax, S, E, I, R):
     ax.clear()
-    ax.set_title("Rete di Petri (Flusso Agenti)")
-    
+
     # Posizioni fisse per posti e transizioni
     places = {
         'S': {'pos': (0.1, 0.5), 'count': S, 'color': AGENT_COLORS[0]},
