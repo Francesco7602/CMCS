@@ -48,6 +48,8 @@ from .gillespie import run_gillespie_simulation
 
 # --- GESTIONE STATO REATTIVO (SOLARA) ---
 
+LONG_TERM_THRESHOLD = 365
+
 # Tutti i parametri del modello ora sono qui
 sim_params = solara.reactive({
     "N": 500,
@@ -58,6 +60,7 @@ sim_params = solara.reactive({
     "gamma": 0.1,
     "prob_symp": 0.6,
     "incubation_mean": 3,
+    "mu": 0.0,
     # Topologia
     "topology": "grid",
     "ws_k": 4, "ws_p": 0.1,
@@ -113,7 +116,16 @@ async def run_live_simulation():
     steps = p["steps"]
     sigma = 1.0 / p["incubation_mean"]
 
-    # 1. Inizializza Modello con TUTTI i parametri
+    # LOGICA SOGLIA TEMPORALE
+    is_long_term = steps > LONG_TERM_THRESHOLD
+
+    # CORREZIONE: Se è lungo termine ma mu è 0, forza un valore di default (es. 80 anni)
+    if is_long_term and p["mu"] == 0.0:
+        current_mu = 1.0 / (80 * 365.0)  # Default 80 anni
+    else:
+        current_mu = p["mu"] if is_long_term else 0.0
+
+    # 1. Inizializza Modello ABM (passando il mu dinamico)
     model = VirusModel(
         N=p["N"], width=p["grid_size"], height=p["grid_size"],
         beta=p["beta"], gamma=p["gamma"], incubation_mean=p["incubation_mean"],
@@ -125,23 +137,48 @@ async def run_live_simulation():
         # Parametri Lockdown (passiamo valori fittizi se disabilitato)
         lockdown_threshold_pct=p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
         lockdown_max_sd=p["lockdown_max_sd"] if p["lockdown_enabled"] else 0.0,
-        lockdown_active_threshold=0.05
+        lockdown_active_threshold=0.05,
+        mu=current_mu  # <--- Passa il mu calcolato
     )
     model_instance.set(model)
 
     # 2. ODE & Gillespie (Background)
     CORRECT_N = model.N
-    y0 = (CORRECT_N - 1, 1, 0, 0)  # S, E, I, R
     t_ode = np.linspace(0, steps, steps)
 
-    # ODE
-    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
+    # Calcolo Condizioni Iniziali (Vaccinazione Statica al tempo 0)
+    # Questa c'è SEMPRE se vax_strat != 'none', sia breve che lungo termine.
+    initial_vaccinated = int(CORRECT_N * p["vax_pct"]) if p["vax_strat"] != "none" else 0
+    y0 = (CORRECT_N - 1 - initial_vaccinated, 1, 0, initial_vaccinated)
+
+    # Parametro vaccinazione ODE per i NUOVI NATI
+    # Se siamo nel breve termine (mu=0), vax_pct_ode deve essere 0 (non nascono bambini).
+    # Se siamo nel lungo termine (mu>0), vax_pct_ode è la % di vaccinazione.
+    vax_pct_ode = p["vax_pct"] if (is_long_term and p["vax_strat"] != "none") else 0.0
+
+    # Chiamata ODE aggiornata
+    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, vax_pct_ode))
+    #ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
     ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
     ode_data.set(ode_curr)
 
     # Gillespie
+    # Passiamo gli stessi parametri usati per l'ODE e l'ABM
+    # Nota: vax_pct per Gillespie segue la logica "lungo termine" (vaccinazione nuovi nati)
+    vax_pct_gillespie = p["vax_pct"] if (is_long_term and p["vax_strat"] != "none") else 0.0
+
     loop = asyncio.get_running_loop()
-    g_df = await loop.run_in_executor(None, run_gillespie_simulation, CORRECT_N, p["beta"], p["gamma"], sigma, steps)
+    g_df = await loop.run_in_executor(
+        None,
+        run_gillespie_simulation,
+        CORRECT_N,
+        p["beta"],
+        p["gamma"],
+        sigma,
+        steps,
+        current_mu,  # <--- Nuovo parametro
+        vax_pct_gillespie  # <--- Nuovo parametro
+    )
     gillespie_data.set(g_df)
 
     # 3. ABM Loop
@@ -255,8 +292,23 @@ def SidebarParams():
     with solara.Details("Generale", expand=True):
         solara.SliderInt("Popolazione", value=p["N"], min=50, max=1000, step=50, on_value=lambda v: update("N", v),
                          disabled=busy)
-        solara.SliderInt("Step Simulazione", value=p["steps"], min=50, max=500, step=10,
-                         on_value=lambda v: update("steps", v), disabled=busy)
+        solara.SliderInt("Step Simulazione", value=p["steps"], min=50, max=3650, step=50,
+                     on_value=lambda v: update("steps", v), disabled=busy)
+
+        # Mostra slider Mu solo se superiamo la soglia
+        if p["steps"] > LONG_TERM_THRESHOLD:
+            solara.Markdown("**Parametri Lungo Termine**")
+
+            # Helper per convertire anni -> mu giornaliero
+            def set_mu_from_years(years):
+                val = 0.0 if years <= 0 else 1.0 / (years * 365.0)
+                update("mu", val)
+
+            # Calcola anni correnti da mu (inverso)
+            current_years = int(1.0 / (p["mu"] * 365.0)) if p["mu"] > 0 else 80
+
+            solara.SliderInt("Speranza di Vita (anni)", value=current_years, min=1, max=100,
+                             on_value=set_mu_from_years, disabled=busy)
         solara.SliderInt("Griglia (LxL)", value=p["grid_size"], min=10, max=50, step=5,
                          on_value=lambda v: update("grid_size", v), disabled=busy)
 

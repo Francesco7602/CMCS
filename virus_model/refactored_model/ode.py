@@ -1,39 +1,28 @@
 # virus_model/refactored_model/ode.py
-#nel pacchetto di slide 3 la formula e diversda...
-#puoi estender il modello con una versione births and death
-#e con la versione che considera le vqaccinazioni (anche se forse gia lo faccio in qualche modo)
-"""
--------------------------------------------------------------------------
-NOTE: Difference between SIR and SEIR Models
--------------------------------------------------------------------------
 
-The fundamental difference lies in the inclusion of the 'Exposed' (E)
-compartment, which represents the incubation/latency period.
-
-1. SIR Model (S -> I -> R):
-   - Assumes instantaneous infectiousness.
-   - Once a Susceptible individual contacts the virus, they immediately
-     become Infected (I) and capable of spreading it.
-   - Governed only by Beta (infection rate) and Gamma (recovery rate).
-
-2. SEIR Model (S -> E -> I -> R) [CURRENTLY IMPLEMENTED]:
-   - Introduces a latency period.
-   - Upon contact, a Susceptible individual becomes 'Exposed' (E).
-   - In the 'E' state, the individual is infected but NOT yet infectious
-     (they cannot spread the virus to others).
-   - Transition from E -> I occurs at rate Sigma (σ),
-     where σ = 1 / mean_incubation_period.
-
-Impact on Simulation:
-The SEIR model results in a delayed epidemic peak compared to the SIR model
-because the 'Exposed' state acts as a buffer, slowing down the initial
-spread of the infection.
--------------------------------------------------------------------------
-"""
-def seir_ode(y, t, N, beta, sigma, gamma):
+def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, vax_pct=0.0):
     S, E, I, R = y
-    dSdt = -beta * S * I / N
-    dEdt = beta * S * I / N - sigma * E
-    dIdt = sigma * E - gamma * I
-    dRdt = gamma * I
+
+    # Flussi vitali (Nati)
+    births = mu * N
+    new_vaccinated = births * vax_pct          # Quota p dei neonati (slide 66)
+    new_susceptibles = births * (1 - vax_pct)  # I restanti sono suscettibili
+
+    # Flussi Epidemici
+    infection = beta * S * I / N
+    progression = sigma * E
+    recovery = gamma * I
+
+    # Morti naturali (proporzionali alla popolazione attuale del comparto)
+    d_S_death = mu * S
+    d_E_death = mu * E
+    d_I_death = mu * I
+    d_R_death = mu * R
+
+    # Equazioni Differenziali
+    dSdt = new_susceptibles - infection - d_S_death
+    dEdt = infection - progression - d_E_death
+    dIdt = progression - recovery - d_I_death
+    dRdt = recovery + new_vaccinated - d_R_death
+
     return dSdt, dEdt, dIdt, dRdt

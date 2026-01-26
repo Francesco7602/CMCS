@@ -1,6 +1,7 @@
 # virus_model/refactored_model/model.py
 
 import networkx as nx
+import numpy as np
 from mesa import Model
 from mesa.space import MultiGrid, NetworkGrid
 from mesa.datacollection import DataCollector
@@ -25,9 +26,12 @@ class VirusModel(Model):
                  vaccine_strategy="none", vaccine_pct=0.0,
                  scheduler_type="random",
                  prob_symptomatic=0.6,
-                 lockdown_threshold_pct=0.2, lockdown_max_sd=0.9, lockdown_active_threshold=0.1):
+                 lockdown_threshold_pct=0.2, lockdown_max_sd=0.9, lockdown_active_threshold=0.1, mu=0.0):
 
         super().__init__()
+        self.mu = mu
+        self.vaccine_pct = vaccine_pct
+        self.np_random = np.random.default_rng(self.random.randint(0, 2**32 - 1))
         
         self.topology = topology
         if topology == "communities":
@@ -157,6 +161,39 @@ class VirusModel(Model):
         else:
             self.agents.do("step_sensing")
             self.agents.do("step_apply")
+
+        # --- NUOVA LOGICA: VITAL DYNAMICS (Nascite/Morti) ---
+        if self.mu > 0:
+            # Calcola quanti muoiono in questo step (distribuzione binomiale)
+            n_deaths = self.np_random.binomial(self.N, self.mu)
+
+            if n_deaths > 0:
+                # Scegli a caso chi muore
+                agents_list = list(self.agents)
+                dying_agents = self.random.sample(agents_list, n_deaths)
+
+                for agent in dying_agents:
+                    # 1. Aggiorna contatori (rimuovi stato vecchio)
+                    if agent.state == 0: self.s_count -= 1
+                    elif agent.state == 1: self.e_count -= 1
+                    elif agent.state == 2: self.i_asymp_count -= 1
+                    elif agent.state == 3: self.i_symp_count -= 1
+                    elif agent.state == 4: self.r_count -= 1
+
+                    # 2. Respawn (Il "figlio" prende il posto del "morto")
+                    # Decide se nasce vaccinato
+                    if self.random.random() < self.vaccine_pct:
+                        agent.state = 4 # STATE_RECOVERED
+                        agent._next_state = 4
+                        self.r_count += 1
+                    else:
+                        agent.state = 0 # STATE_SUSCEPTIBLE
+                        agent._next_state = 0
+                        self.s_count += 1
+
+                    # Reset contatori interni dell'agente
+                    agent.days_exposed = 0
+        
         self.steps_count += 1
 
     def get_social_distancing(self, agent):
