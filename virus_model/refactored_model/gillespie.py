@@ -20,10 +20,10 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, vax_pct=0
     # Per semplicità, replichiamo lo stato "standard" con 1 esposto.
     # NOTA: Se volessi passare lo stato iniziale esatto, dovremmo aggiungere argomenti.
     # Qui approssimiamo partendo da 1 E e il resto S/R in base a vax_pct se mu > 0 (o standard se mu=0).
-
+    initial_infected_count = 5  # Era 1, mettiamo 5 per evitare estinzione immediata
     # Calcolo S, R iniziali approssimati
     initial_vaccinated = int(N * vax_pct) if vax_pct > 0 else 0
-    E = 1
+    E = initial_infected_count
     I = 0
     S = N - 1 - initial_vaccinated
     R = initial_vaccinated
@@ -147,7 +147,6 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, vax_pct=0
         I_hist.append(I)
         R_hist.append(R)
 
-    # --- FIX GRAFICO: Padding finale ---
     # Se il loop è finito prima di max_steps (es. estinzione o total_rate=0),
     # aggiungiamo un punto finale per estendere la linea piatta nel grafico.
     if t < max_steps:

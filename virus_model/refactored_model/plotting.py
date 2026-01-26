@@ -62,7 +62,7 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
 
     if model.G is not None:
         colors = [AGENT_COLORS[a.state] for a in model.agents]
-        pos = nx.spring_layout(model.G, seed=42)
+        pos = model.layout if model.layout is not None else nx.spring_layout(model.G, seed=42)
         nx.draw(model.G, pos=pos, ax=ax2, node_size=50, node_color=colors, width=0.5, edge_color="#CCCCCC")
         ax2.set_title(f"Stato Finale Rete - {timestamp}")
     else:
@@ -95,20 +95,31 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     return path_curves, path_map, path_petri
 
 
-def save_batch_results_plot(peaks):
+# In plotting.py
+
+def save_batch_results_plot(peaks, threshold=None):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     fig3 = plt.figure(figsize=(10, 6))
     ax3 = fig3.add_subplot(111)
+
+    # Istogramma
     ax3.hist(peaks, bins=15, color="purple", alpha=0.7, edgecolor='black')
+
+    # Linea Soglia (se passata)
+    if threshold is not None:
+        ax3.axvline(threshold, color='r', linestyle='--', linewidth=2, label=f"Soglia ({threshold})")
+        ax3.legend()
+
     ax3.set_title(f"Analisi Stocastica Batch ({len(peaks)} runs) - {timestamp}")
     ax3.set_xlabel("Picco Massimo Infetti")
     ax3.set_ylabel("Frequenza")
     ax3.grid(axis='y', alpha=0.5, linestyle='--')
+
     path_batch = os.path.join(OUTPUT_DIR, f"batch_{timestamp}_histogram.png")
     fig3.savefig(path_batch, dpi=150, bbox_inches='tight')
     plt.close(fig3)
-    return path_batch
 
+    return path_batch
 
 def draw_petri_net(ax, S, E, I, R):
     ax.clear()
@@ -156,3 +167,36 @@ def draw_petri_net(ax, S, E, I, R):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis('off')
+
+
+# virus_model/refactored_model/plotting.py
+
+def save_sweep_results_plot(results, param_name):
+    """
+    Salva il grafico del parameter sweep.
+    results: lista di tuple (valore_parametro, picco_infetti)
+    param_name: nome del parametro analizzato (es. 'beta')
+    """
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    # Separa x (valore parametro) e y (picco)
+    x_val = [r[0] for r in results]
+    y_val = [r[1] for r in results]
+
+    ax.plot(x_val, y_val, '-o', color='teal', linewidth=2)
+
+    ax.set_title(f"Parameter Sweep: {param_name} - {timestamp}")
+    ax.set_xlabel(param_name)
+    ax.set_ylabel("Picco Infetti (Max)")
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # Costruisci nome file univoco
+    filename = f"sweep_{param_name}_{timestamp}.png"
+    plot_path = os.path.join(OUTPUT_DIR, filename)
+
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    return plot_path

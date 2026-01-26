@@ -27,7 +27,7 @@ A Petri Net is a compact way to describe how parts of the state interact.
 import solara
 import solara.lab
 import matplotlib
-
+import os
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -43,10 +43,8 @@ from .constants import (
 )
 from .ode import seir_ode
 from .model import VirusModel
-from .plotting import save_single_run_results, save_batch_results_plot, draw_petri_net
+from .plotting import save_single_run_results, save_batch_results_plot, draw_petri_net, save_sweep_results_plot
 from .gillespie import run_gillespie_simulation
-
-# --- GESTIONE STATO REATTIVO (SOLARA) ---
 
 LONG_TERM_THRESHOLD = 365
 
@@ -75,6 +73,7 @@ sim_params = solara.reactive({
     "lockdown_max_sd": 0.8,  # Distanziamento massimo
     # Sistema
     "scheduler": "simultaneous",
+    "speed_mode": "animata",  # Opzioni: "animata", "turbo"
 })
 
 stochastic_params = solara.reactive({
@@ -182,18 +181,51 @@ async def run_live_simulation():
     gillespie_data.set(g_df)
 
     # 3. ABM Loop
-    for i in range(steps):
-        model.step()
+    speed_mode = p.get("speed_mode", "animata")
+
+    if speed_mode == "turbo":
+        status_msg.set("Esecuzione Turbo in corso...")
+
+        # Eseguiamo il calcolo in un thread separato (ma bloccante per la logica sequenziale)
+        # Per evitare di bloccare la UI totalmente su 5000 step, usiamo yield ogni tanto
+        # Ma il modo più veloce in assoluto è fare il loop puro Python senza await.
+
+        # Facciamo blocchi da 100 step per lasciare la UI reattiva al tasto "Stop" (se ci fosse)
+        chunk_size = 100
+        remaining_steps = steps
+
+        while remaining_steps > 0:
+            current_chunk = min(chunk_size, remaining_steps)
+            for _ in range(current_chunk):
+                model.step()
+
+            remaining_steps -= current_chunk
+            # Un micro await per non freezare il browser se fai 10.000 step
+            await asyncio.sleep(0.001)
+
+            # FINITO: Raccogli i dati UNA VOLTA SOLA alla fine
         model_instance.set(model)
         df = model.datacollector.get_model_vars_dataframe()
         run_data.set(df)
-        await asyncio.sleep(0.01)  # Velocità animazione
 
+    else:
+        # MODALITÀ CLASSICA (ANIMATA)
+        # Aggiorna ogni singolo step (Lento ma vedi l'evoluzione)
+        for i in range(steps):
+            model.step()
+
+            # Aggiornamento UI
+            model_instance.set(model)
+            df = model.datacollector.get_model_vars_dataframe()
+            run_data.set(df)
+
+            # Pausa estetica
+            await asyncio.sleep(0.01)
     try:
         save_single_run_results(model, df, ode_curr, g_df)
-        status_msg.set(f"✅ Run salvata in {OUTPUT_DIR}")
+        status_msg.set(f"Run salvata in {OUTPUT_DIR}")
     except Exception as e:
-        status_msg.set(f"⚠️ Errore salvataggio: {e}")
+        status_msg.set(f" Errore salvataggio: {e}")
 
     is_running.set(False)
 
@@ -212,13 +244,16 @@ def run_batch_analysis():
 
     for i in range(sp["runs"]):
         # Modello "leggero" per performance
+        current_mu = p["mu"] if p["steps"] > LONG_TERM_THRESHOLD else 0.0
+
         m = VirusModel(
-            N=p["N"], width=20, height=20,
-            beta=p["beta"], gamma=p["gamma"], incubation_mean=3,
+            N=p["N"], width=p["grid_size"], height=p["grid_size"],
+            beta=p["beta"], gamma=p["gamma"], incubation_mean=p["incubation_mean"],
             topology=p["topology"], ws_k=p["ws_k"], ws_p=p["ws_p"], er_p=p["er_p"],
             comm_l=p["comm_l"], comm_k=p["comm_k"],
             vaccine_strategy=p["vax_strat"], vaccine_pct=p["vax_pct"],
-            scheduler_type="random", prob_symptomatic=p["prob_symp"]
+            scheduler_type="random", prob_symptomatic=p["prob_symp"],
+            mu=current_mu
         )
 
         local_peak = 0
@@ -234,7 +269,10 @@ def run_batch_analysis():
 
     stochastic_results.set({"peaks": peaks, "probability": exceeded / sp["runs"]})
     is_analyzing.set(False)
-    status_msg.set("✅ Batch completato.")
+    status_msg.set("Batch completato.")
+    plot_path = save_batch_results_plot(peaks, threshold=sp["threshold"])
+
+    status_msg.set(f"Batch salvato: {os.path.basename(plot_path)}")
 
 
 def run_parameter_sweep():
@@ -252,14 +290,31 @@ def run_parameter_sweep():
     for val in vals:
         curr_p = p.copy()
         curr_p[sw["parameter"]] = val
+        is_long_term = curr_p["steps"] > LONG_TERM_THRESHOLD
+        if is_long_term and curr_p["mu"] == 0.0:
+            current_mu = 1.0 / (80 * 365.0)
+        else:
+            current_mu = curr_p["mu"] if is_long_term else 0.0
 
         m = VirusModel(
-            N=curr_p["N"], width=20, height=20,
-            beta=curr_p["beta"], gamma=curr_p["gamma"], incubation_mean=3,
-            topology=curr_p["topology"], ws_k=curr_p["ws_k"], ws_p=curr_p["ws_p"], er_p=curr_p["er_p"],
+            N=curr_p["N"],
+            width=curr_p["grid_size"],  # <--- Usa grid_size, non 20 fisso
+            height=curr_p["grid_size"],  # <--- Usa grid_size
+            beta=curr_p["beta"],
+            gamma=curr_p["gamma"],
+            incubation_mean=curr_p["incubation_mean"],
+            topology=curr_p["topology"],
+            ws_k=curr_p["ws_k"], ws_p=curr_p["ws_p"], er_p=curr_p["er_p"],
+            ba_m=curr_p["ba_m"],  # <--- Aggiunto parametro mancante
             comm_l=curr_p["comm_l"], comm_k=curr_p["comm_k"],
-            vaccine_strategy=curr_p["vax_strat"], vaccine_pct=curr_p["vax_pct"],
-            scheduler_type="random", prob_symptomatic=curr_p["prob_symp"]
+            vaccine_strategy=curr_p["vax_strat"],
+            vaccine_pct=curr_p["vax_pct"],
+            scheduler_type="random",
+            prob_symptomatic=curr_p["prob_symp"],
+            # Parametri Lockdown (per coerenza)
+            lockdown_threshold_pct=curr_p["lockdown_thresh"] if curr_p["lockdown_enabled"] else 1.0,
+            lockdown_max_sd=curr_p["lockdown_max_sd"] if curr_p["lockdown_enabled"] else 0.0,
+            mu=current_mu  # <--- FONDAMENTALE: passa il mu calcolato
         )
         peak = 0
         for _ in range(curr_p["steps"]):
@@ -271,6 +326,9 @@ def run_parameter_sweep():
     sweep_results.set(res)
     is_sweeping.set(False)
     status_msg.set("✅ Sweep completato.")
+    plot_path = save_sweep_results_plot(res, sw["parameter"])
+
+    status_msg.set(f"✅ Sweep salvato: {os.path.basename(plot_path)}")
 
 
 # --- UI COMPONENTS ---
@@ -290,7 +348,7 @@ def SidebarParams():
 
     # 1. GENERALE (Sostituito ExpansionPanel con Details)
     with solara.Details("Generale", expand=True):
-        solara.SliderInt("Popolazione", value=p["N"], min=50, max=1000, step=50, on_value=lambda v: update("N", v),
+        solara.SliderInt("Popolazione", value=p["N"], min=50, max=10000, step=100, on_value=lambda v: update("N", v),
                          disabled=busy)
         solara.SliderInt("Step Simulazione", value=p["steps"], min=50, max=3650, step=50,
                      on_value=lambda v: update("steps", v), disabled=busy)
@@ -359,6 +417,15 @@ def SidebarParams():
                                step=0.05, on_value=lambda v: update("lockdown_thresh", v), disabled=busy)
             solara.SliderFloat("Max Distanziamento", value=p["lockdown_max_sd"], min=0.1, max=1.0, step=0.1,
                                on_value=lambda v: update("lockdown_max_sd", v), disabled=busy)
+    solara.Select(
+        label="Velocità Esecuzione",
+        value=p.get("speed_mode", "animata"),
+        values=["animata", "turbo"],
+        on_value=lambda v: update("speed_mode", v),
+        disabled=busy
+    )
+    if p.get("speed_mode") == "turbo":
+        solara.Info("Turbo: Aggiorna il grafico solo alla fine. Molto veloce.", icon=False)
 
 
 @solara.component
@@ -435,9 +502,10 @@ def Dashboard():
                                 fig2, ax2 = plt.subplots(figsize=(5, 5))
                                 model = model_instance.value
                                 if model.G:
-                                    pos = nx.spring_layout(model.G, seed=42)
+                                    pos = model.layout
                                     colors = [AGENT_COLORS[a.state] for a in model.agents]
-                                    nx.draw(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors, width=0.5)
+                                    nx.draw_networkx_nodes(model.G, pos=pos, ax=ax2, node_size=30, node_color=colors)
+                                    nx.draw_networkx_edges(model.G, pos=pos, ax=ax2, alpha=0.1)
                                 else:
                                     grid = np.full((model.width, model.height), -1)
                                     for a in model.agents: grid[a.pos] = a.state

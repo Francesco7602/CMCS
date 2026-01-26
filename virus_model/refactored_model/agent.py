@@ -74,14 +74,16 @@ class VirusAgent(Agent):
         self.step_apply()
 
     def check_exposure(self):
-        if self._neighbors is None:
-            if isinstance(self.model.grid, NetworkGrid):
+        if isinstance(self.model.grid, NetworkGrid):
+            if self._neighbors is None:
                 neighbor_nodes = list(self.model.grid.G.neighbors(self.pos))
                 self._neighbors = self.model.grid.get_cell_list_contents(neighbor_nodes)
-            else:
-                self._neighbors = self.model.grid.get_neighbors(self.pos, moore=True, include_center=False)
+            neighborhood = self._neighbors
+        else:
+            # SU MULTIGRID (DINAMICO) DOBBIAMO RICALCOLARE SEMPRE PERCHE' CI MUOVIAMO
+            neighborhood = self.model.grid.get_neighbors(self.pos, moore=True, include_center=False)
 
-        for neighbor in self._neighbors:
+        for neighbor in neighborhood:
             if neighbor.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC]:
                 if self.random.random() < self.beta:
                     return True

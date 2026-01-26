@@ -29,6 +29,7 @@ class VirusModel(Model):
                  lockdown_threshold_pct=0.2, lockdown_max_sd=0.9, lockdown_active_threshold=0.1, mu=0.0):
 
         super().__init__()
+        self.layout = None
         self.mu = mu
         self.vaccine_pct = vaccine_pct
         self.np_random = np.random.default_rng(self.random.randint(0, 2**32 - 1))
@@ -78,6 +79,12 @@ class VirusModel(Model):
         else:
             self.G = None
             self.grid = MultiGrid(width, height, torus=True)
+
+        if self.G is not None:
+            # Calcoliamo le posizioni UNA volta sola all'avvio.
+            # spring_layout è bello ma lento, calcolarlo qui evita di farlo nel loop.
+            # Usiamo seed=42 per coerenza visiva.
+            self.layout = nx.spring_layout(self.G, seed=42)
 
         for i in range(self.N):
             a = VirusAgent(self, beta, gamma, incubation_mean, prob_symptomatic)
@@ -174,11 +181,16 @@ class VirusModel(Model):
 
                 for agent in dying_agents:
                     # 1. Aggiorna contatori (rimuovi stato vecchio)
-                    if agent.state == 0: self.s_count -= 1
-                    elif agent.state == 1: self.e_count -= 1
-                    elif agent.state == 2: self.i_asymp_count -= 1
-                    elif agent.state == 3: self.i_symp_count -= 1
-                    elif agent.state == 4: self.r_count -= 1
+                    if agent.state == STATE_SUSCEPTIBLE:
+                        self.s_count -= 1
+                    elif agent.state == STATE_EXPOSED:
+                        self.e_count -= 1
+                    elif agent.state == STATE_INFECTED_ASYMPTOMATIC:
+                        self.i_asymp_count -= 1
+                    elif agent.state == STATE_INFECTED_SYMPTOMATIC:
+                        self.i_symp_count -= 1
+                    elif agent.state == STATE_RECOVERED:
+                        self.r_count -= 1
 
                     # 2. Respawn (Il "figlio" prende il posto del "morto")
                     # Decide se nasce vaccinato
