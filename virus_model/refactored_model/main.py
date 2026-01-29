@@ -36,6 +36,7 @@ import pandas as pd
 import asyncio
 import networkx as nx
 from scipy.integrate import odeint
+from mesa.batchrunner import batch_run
 
 from .constants import (
     STATE_EMPTY, SHORT_LABELS, AGENT_COLORS, GRID_CMAP, OUTPUT_DIR,
@@ -45,6 +46,14 @@ from .ode import seir_ode
 from .model import VirusModel
 from .plotting import save_single_run_results, save_batch_results_plot, draw_petri_net, save_sweep_results_plot
 from .gillespie import run_gillespie_simulation
+
+
+# Wrapper to handle 'rng' parameter from Mesa's batch_run
+class _VirusModelWrapper(VirusModel):
+    def __init__(self, **kwargs):
+        kwargs.pop('rng', None)
+        super().__init__(**kwargs)
+
 
 LONG_TERM_THRESHOLD = 365
 
@@ -230,8 +239,9 @@ async def run_live_simulation():
     is_running.set(False)
 
 
-def run_batch_analysis():
-    """Esegue batch analysis (Tab 2)."""
+
+async def run_batch_analysis():
+    """Esegue batch analysis (Tab 2) usando mesa.batch_run."""
     if is_analyzing.value: return
     is_analyzing.set(True)
     stochastic_results.set(None)
@@ -239,96 +249,135 @@ def run_batch_analysis():
 
     p = sim_params.value
     sp = stochastic_params.value
+
+    current_mu = p["mu"] if p["steps"] > LONG_TERM_THRESHOLD else 0.0
+
+    model_params = {
+        "N": p["N"], "width": p["grid_size"], "height": p["grid_size"],
+        "beta": p["beta"], "gamma": p["gamma"], "incubation_mean": p["incubation_mean"],
+        "topology": p["topology"], "ws_k": p["ws_k"], "ws_p": p["ws_p"], "er_p": p["er_p"], "ba_m": p["ba_m"],
+        "comm_l": p["comm_l"], "comm_k": p["comm_k"],
+        "vaccine_strategy": p["vax_strat"], "vaccine_pct": p["vax_pct"],
+        "scheduler_type": "random", "prob_symptomatic": p["prob_symp"],
+        "mu": current_mu,
+        "lockdown_threshold_pct": p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
+        "lockdown_max_sd": p["lockdown_max_sd"] if p["lockdown_enabled"] else 0.0,
+        "lockdown_active_threshold": 0.05,
+    }
+
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(
+        None,
+        batch_run,
+        _VirusModelWrapper,
+        model_params,                    # parameters
+        None,                            # number_processes
+        sp["runs"],                      # iterations
+        1,                               # data_collection_period
+        p["steps"],                      # max_steps
+        True,                            # display_progress
+    )
+
+    results_df = pd.DataFrame(results)
     peaks = []
     exceeded = 0
 
-    for i in range(sp["runs"]):
-        # Modello "leggero" per performance
-        current_mu = p["mu"] if p["steps"] > LONG_TERM_THRESHOLD else 0.0
-
-        m = VirusModel(
-            N=p["N"], width=p["grid_size"], height=p["grid_size"],
-            beta=p["beta"], gamma=p["gamma"], incubation_mean=p["incubation_mean"],
-            topology=p["topology"], ws_k=p["ws_k"], ws_p=p["ws_p"], er_p=p["er_p"],
-            comm_l=p["comm_l"], comm_k=p["comm_k"],
-            vaccine_strategy=p["vax_strat"], vaccine_pct=p["vax_pct"],
-            scheduler_type="random", prob_symptomatic=p["prob_symp"],
-            mu=current_mu
-        )
-
-        local_peak = 0
-        crossed = False
-        for _ in range(p["steps"]):
-            m.step()
-            inf = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
-            if inf > local_peak: local_peak = inf
-            if inf > sp["threshold"]: crossed = True
-
+    if "RunId" in results_df.columns:
+        for _, run_df in results_df.groupby("RunId"):
+            infected = run_df["I_asymp"] + run_df["I_symp"]
+            local_peak = infected.max()
+            peaks.append(local_peak)
+            if local_peak > sp["threshold"]:
+                exceeded += 1
+    elif not results_df.empty:
+        infected = results_df["I_asymp"] + results_df["I_symp"]
+        local_peak = infected.max()
         peaks.append(local_peak)
-        if crossed: exceeded += 1
+        if local_peak > sp["threshold"]:
+            exceeded += 1
 
-    stochastic_results.set({"peaks": peaks, "probability": exceeded / sp["runs"]})
+    stochastic_results.set({"peaks": peaks, "probability": exceeded / sp["runs"] if sp["runs"] > 0 else 0})
     is_analyzing.set(False)
     status_msg.set("Batch completato.")
     plot_path = save_batch_results_plot(peaks, threshold=sp["threshold"])
-
     status_msg.set(f"Batch salvato: {os.path.basename(plot_path)}")
 
 
-def run_parameter_sweep():
-    """Esegue parameter sweep (Tab 3)."""
+async def run_parameter_sweep():
+    """Esegue parameter sweep (Tab 3) usando mesa.batch_run, con medie su più run."""
     if is_sweeping.value: return
     is_sweeping.set(True)
     sweep_results.set(None)
-    status_msg.set("Sweep in corso...")
+    status_msg.set("Sweep in corso (10 run per punto)...")
 
     p = sim_params.value
     sw = sweep_params.value
     vals = np.linspace(sw["start"], sw["end"], sw["num_steps"])
-    res = []
 
-    for val in vals:
-        curr_p = p.copy()
-        curr_p[sw["parameter"]] = val
-        is_long_term = curr_p["steps"] > LONG_TERM_THRESHOLD
-        if is_long_term and curr_p["mu"] == 0.0:
-            current_mu = 1.0 / (80 * 365.0)
-        else:
-            current_mu = curr_p["mu"] if is_long_term else 0.0
+    is_long_term = p["steps"] > LONG_TERM_THRESHOLD
+    current_mu = (1.0 / (80 * 365.0)) if (is_long_term and p["mu"] == 0.0) else (p["mu"] if is_long_term else 0.0)
 
-        m = VirusModel(
-            N=curr_p["N"],
-            width=curr_p["grid_size"],  # <--- Usa grid_size, non 20 fisso
-            height=curr_p["grid_size"],  # <--- Usa grid_size
-            beta=curr_p["beta"],
-            gamma=curr_p["gamma"],
-            incubation_mean=curr_p["incubation_mean"],
-            topology=curr_p["topology"],
-            ws_k=curr_p["ws_k"], ws_p=curr_p["ws_p"], er_p=curr_p["er_p"],
-            ba_m=curr_p["ba_m"],  # <--- Aggiunto parametro mancante
-            comm_l=curr_p["comm_l"], comm_k=curr_p["comm_k"],
-            vaccine_strategy=curr_p["vax_strat"],
-            vaccine_pct=curr_p["vax_pct"],
-            scheduler_type="random",
-            prob_symptomatic=curr_p["prob_symp"],
-            # Parametri Lockdown (per coerenza)
-            lockdown_threshold_pct=curr_p["lockdown_thresh"] if curr_p["lockdown_enabled"] else 1.0,
-            lockdown_max_sd=curr_p["lockdown_max_sd"] if curr_p["lockdown_enabled"] else 0.0,
-            mu=current_mu  # <--- FONDAMENTALE: passa il mu calcolato
+    model_params = {
+        "N": p["N"], "width": p["grid_size"], "height": p["grid_size"],
+        "beta": p["beta"], "gamma": p["gamma"], "incubation_mean": p["incubation_mean"],
+        "topology": p["topology"], "ws_k": p["ws_k"], "ws_p": p["ws_p"], "er_p": p["er_p"], "ba_m": p["ba_m"],
+        "comm_l": p["comm_l"], "comm_k": p["comm_k"],
+        "vaccine_strategy": p["vax_strat"],
+        "vaccine_pct": p["vax_pct"],
+        "scheduler_type": "random",
+        "prob_symptomatic": p["prob_symp"],
+        "mu": current_mu,
+        "lockdown_threshold_pct": p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
+        "lockdown_max_sd": p["lockdown_max_sd"] if p["lockdown_enabled"] else 0.0,
+        "lockdown_active_threshold": 0.05,
+    }
+
+    # Mappa i nomi brevi dei parametri dell'interfaccia utente ai nomi lunghi dei parametri del modello
+    param_map = {
+        "vax_pct": "vaccine_pct",
+        "prob_symp": "prob_symptomatic",
+    }
+    sweep_model_param = param_map.get(sw["parameter"], sw["parameter"])
+    model_params[sweep_model_param] = vals
+
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(
+        None,
+        batch_run,
+        _VirusModelWrapper,
+        model_params,
+        None,  # number_processes
+        10,  # iterations
+        1,  # data_collection_period
+        p["steps"],  # max_steps
+        True,  # display_progress
+    )
+
+    results_df = pd.DataFrame(results)
+
+    if sweep_model_param in results_df.columns:
+        # Calcola il picco di infetti per ogni singola esecuzione
+        peaks_per_run = results_df.groupby([sweep_model_param, "iteration"]).apply(
+            lambda run_df: (run_df["I_asymp"] + run_df["I_symp"]).max()
         )
-        peak = 0
-        for _ in range(curr_p["steps"]):
-            m.step()
-            inf = sum(1 for a in m.agents if a.state in [STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC])
-            if inf > peak: peak = inf
-        res.append((val, peak))
+
+        # Ora, per ogni valore del parametro sweep, calcola la media dei picchi
+        avg_peaks = peaks_per_run.groupby(sweep_model_param).mean()
+
+        res = list(zip(avg_peaks.index, avg_peaks.values))
+    else:
+        res = []
+
 
     sweep_results.set(res)
     is_sweeping.set(False)
     status_msg.set("✅ Sweep completato.")
-    plot_path = save_sweep_results_plot(res, sw["parameter"])
+    if res:
+        # Usa il nome breve originale per il grafico/salvataggio
+        plot_path = save_sweep_results_plot(res, sw["parameter"])
+        status_msg.set(f"✅ Sweep salvato: {os.path.basename(plot_path)}")
 
-    status_msg.set(f"✅ Sweep salvato: {os.path.basename(plot_path)}")
+
 
 
 # --- UI COMPONENTS ---
@@ -534,7 +583,7 @@ def Dashboard():
                         solara.InputInt("Soglia Rischio", value=stochastic_params.value["threshold"],
                                         on_value=lambda v: stochastic_params.set(
                                             {**stochastic_params.value, "threshold": v}))
-                    solara.Button("⚡ Avvia Batch", on_click=run_batch_analysis, color="warning", disabled=busy)
+                    solara.Button("⚡ Avvia Batch", on_click=lambda: asyncio.create_task(run_batch_analysis()), color="warning", disabled=busy)
 
                     if stochastic_results.value:
                         res = stochastic_results.value
@@ -560,7 +609,7 @@ def Dashboard():
                                           on_value=lambda v: sweep_params.set({**sweep_params.value, "end": v}))
                         solara.InputInt("Steps", value=sweep_params.value["num_steps"],
                                         on_value=lambda v: sweep_params.set({**sweep_params.value, "num_steps": v}))
-                    solara.Button("🔍 Avvia Sweep", on_click=run_parameter_sweep, color="secondary", disabled=busy)
+                    solara.Button("🔍 Avvia Sweep", on_click=lambda: asyncio.create_task(run_parameter_sweep()), color="secondary", disabled=busy)
 
                     if sweep_results.value:
                         data = sweep_results.value
