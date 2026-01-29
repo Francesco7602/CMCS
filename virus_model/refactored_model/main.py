@@ -258,7 +258,7 @@ async def run_batch_analysis():
         "topology": p["topology"], "ws_k": p["ws_k"], "ws_p": p["ws_p"], "er_p": p["er_p"], "ba_m": p["ba_m"],
         "comm_l": p["comm_l"], "comm_k": p["comm_k"],
         "vaccine_strategy": p["vax_strat"], "vaccine_pct": p["vax_pct"],
-        "scheduler_type": "random", "prob_symptomatic": p["prob_symp"],
+        "scheduler_type": p["scheduler"], "prob_symptomatic": p["prob_symp"],
         "mu": current_mu,
         "lockdown_threshold_pct": p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
         "lockdown_max_sd": p["lockdown_max_sd"] if p["lockdown_enabled"] else 0.0,
@@ -324,7 +324,7 @@ async def run_parameter_sweep():
         "comm_l": p["comm_l"], "comm_k": p["comm_k"],
         "vaccine_strategy": p["vax_strat"],
         "vaccine_pct": p["vax_pct"],
-        "scheduler_type": "random",
+        "scheduler_type": p["scheduler"],
         "prob_symptomatic": p["prob_symp"],
         "mu": current_mu,
         "lockdown_threshold_pct": p["lockdown_thresh"] if p["lockdown_enabled"] else 1.0,
@@ -475,6 +475,19 @@ def SidebarParams():
     )
     if p.get("speed_mode") == "turbo":
         solara.Info("Turbo: Aggiorna il grafico solo alla fine. Molto veloce.", icon=False)
+
+    solara.Select(
+        label="Regime di Attivazione",
+        value=p.get("scheduler", "simultaneous"),
+        values=[
+            ("Synchronous (Simultaneous)", "simultaneous"),
+            ("Uniform (Ordered)", "uniform"),
+            ("Random (Shuffled)", "random"),
+            ("Poisson (Random Interval)", "poisson"),
+        ],
+        on_value=lambda v: update("scheduler", v),
+        disabled=busy
+    )
 
 
 @solara.component

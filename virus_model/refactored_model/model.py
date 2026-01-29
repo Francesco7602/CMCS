@@ -165,11 +165,25 @@ class VirusModel(Model):
 
         if self.scheduler_type == "random":
             self.agents.shuffle_do("step_sequential")
+        if self.scheduler_type == "simultaneous":
+            self.agents.do("step_sequential")  # Prima fase: sensing
+            self.agents.do("advance")          # Seconda fase: apply changes
+        elif self.scheduler_type == "uniform":
+            self.agents.do("step_sequential")  # Esecuzione in ordine deterministico
+        elif self.scheduler_type == "poisson":
+            # Seleziona un sottoinsieme casuale di agenti per questo step
+            active_fraction = np.random.poisson(0.5) / self.N  # Media 0.5 agenti per step
+            n_active = max(1, int(active_fraction * self.N))
+            active_agents = self.random.sample(list(self.agents), min(n_active, len(self.agents)))
+
+            for agent in active_agents:
+                agent.step_sequential()
         else:
+            # Fallback per altri tipi
             self.agents.do("step_sensing")
             self.agents.do("step_apply")
 
-        # --- NUOVA LOGICA: VITAL DYNAMICS (Nascite/Morti) ---
+            # --- NUOVA LOGICA: VITAL DYNAMICS (Nascite/Morti) ---
         if self.mu > 0:
             # Calcola quanti muoiono in questo step (distribuzione binomiale)
             n_deaths = self.np_random.binomial(self.N, self.mu)
