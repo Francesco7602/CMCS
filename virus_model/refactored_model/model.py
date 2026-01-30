@@ -9,13 +9,7 @@ from mesa.datacollection import DataCollector
 from networkx.algorithms import community
 
 from .agent import VirusAgent
-from .constants import (
-    STATE_SUSCEPTIBLE,
-    STATE_EXPOSED,
-    STATE_INFECTED_ASYMPTOMATIC,
-    STATE_INFECTED_SYMPTOMATIC,
-    STATE_RECOVERED,
-)
+from .constants import *
 
 
 class VirusModel(Model):
@@ -87,7 +81,12 @@ class VirusModel(Model):
             self.layout = nx.spring_layout(self.G, seed=42)
 
         for i in range(self.N):
-            a = VirusAgent(self, beta, gamma, incubation_mean, prob_symptomatic)
+            age_group = self.random.choices(
+                [CHILD, TEEN, ADULT, SENIOR],
+                weights=[0.1, 0.1, 0.6, 0.2]
+            )[0]
+
+            a = VirusAgent(self, age_group, beta, gamma, incubation_mean, prob_symptomatic)
             if self.communities:
                 for comm_id, comm in enumerate(self.communities):
                     if i in comm:
@@ -226,3 +225,25 @@ class VirusModel(Model):
         if self.topology == "communities" and agent.community is not None:
             return self.community_social_distancing[agent.community]
         return self.social_distancing
+
+    def remove_and_respawn(self, agent):
+        """Handle death and immediate replacement to maintain population N."""
+        # 1. Update counts for the agent's current state (decrement)
+        if agent.state == STATE_SUSCEPTIBLE:
+            self.s_count -= 1
+        elif agent.state == STATE_EXPOSED:
+            self.e_count -= 1
+        elif agent.state == STATE_INFECTED_ASYMPTOMATIC:
+            self.i_asymp_count -= 1
+        elif agent.state == STATE_INFECTED_SYMPTOMATIC:
+            self.i_symp_count -= 1
+        elif agent.state == STATE_RECOVERED:
+            self.r_count -= 1
+
+        # 2. Reset agent to Susceptible
+        agent.state = STATE_SUSCEPTIBLE
+        agent._next_state = STATE_SUSCEPTIBLE
+        agent.days_exposed = 0
+        
+        # 3. Update counts (increment S)
+        self.s_count += 1

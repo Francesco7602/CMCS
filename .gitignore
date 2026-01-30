@@ -1,0 +1,18 @@
+# Ignore Python bytecode
+*.pyc
+__pycache__/
+virus_model/refactored_model/__pycache__/
+
+# Ignore editor/IDE files
+.idea/
+.vscode/
+
+# Ignore virtual environment
+venv/
+
+# Ignore output data
+output_data/
+
+# Ignore Solara build artifacts
+.solara/
+solara-build/

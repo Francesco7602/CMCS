@@ -2,6 +2,18 @@
 
 import os
 from matplotlib.colors import ListedColormap
+import numpy as np
+
+
+# Age Group Indices
+CHILD = 0
+TEEN = 1
+ADULT = 2
+SENIOR = 3
+
+AGE_LABELS = ["Child", "Teen", "Adult", "Senior"]
+
+MU_GROUP = [0.00009, 0.00005, 0.00688, 0.15987] # Case Fatality Rate
 
 STATE_EMPTY = -1
 STATE_SUSCEPTIBLE = 0

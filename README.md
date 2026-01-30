@@ -24,6 +24,7 @@ The key feature of this tool is the simultaneous comparison of three distinct mo
     - **Communities:** A network with distinct communities, enabling targeted interventions.
 - **Dynamic & Long-Term Policies:**
   - **Vital Dynamics:** Simulates birth and death processes (`mu` parameter) to model open populations in long-term scenarios (e.g., >1 year).
+  - **Disease-Specific Mortality:** Models a Case Fatality Rate (`mu_disease`) where infected agents can die from the disease. Deceased agents are replaced by new susceptible agents to maintain a constant population, distinct from the general birth/death rate.
   - **Vaccination:** Supports multiple strategies:
     - Initial vaccination ('random' or 'targeted' by network centrality).
     - Vaccination of newborns in long-term simulations.
@@ -43,17 +44,19 @@ The simulator implements an **SEIR** model, which can simulate both closed popul
     - **Symptomatic (I_symp):** Infectious and shows symptoms (and may self-isolate).
 - **Recovered (R):** Immune, either through recovery or vaccination.
 
+Infected individuals can also die from the disease at a specified rate (`mu_disease`), at which point they are removed from the population and replaced by a new Susceptible individual to maintain population constancy.
+
 ### Agent-Based Model (ABM)
 
-The core is an ABM where `VirusAgent` instances interact. This model captures complex, emergent behaviors that are difficult to represent with mathematical equations, such as agent movement, network effects, and adaptive lockdowns. It has been extended to support vital dynamics, where agents can be removed (death) and replaced with new (susceptible or vaccinated) agents over time.
+The core is an ABM where `VirusAgent` instances interact. This model captures complex, emergent behaviors that are difficult to represent with mathematical equations, such as agent movement, network effects, and adaptive lockdowns. It has been extended to support vital dynamics, where agents can be removed (death) and replaced with new (susceptible or vaccinated) agents over time. It also models a disease-specific fatality rate, where an agent's probability of dying from the infection can depend on its age group.
 
 ### SEIR ODE Model
 
-For comparison, the simulator solves a deterministic SEIR model using Ordinary Differential Equations. This provides a macroscopic view of the epidemic's average dynamics. The model is extended to include terms for vital dynamics (`mu`) and vaccination of the newborn cohort (`vax_pct`).
+For comparison, the simulator solves a deterministic SEIR model using Ordinary Differential Equations. This provides a macroscopic view of the epidemic's average dynamics. The model is extended to include terms for vital dynamics (`mu`) and vaccination of the newborn cohort (`vax_pct`). It further includes a term for disease-specific mortality (`mu_disease`), where deaths from infection are balanced by new susceptibles to maintain a constant population.
 
 ### Gillespie's Algorithm (SSA)
 
-This is a stochastic, discrete-event simulation that provides an exact trajectory for the system's state evolution. It is computationally more efficient than an ABM for well-mixed populations. Like the ODE model, it has been extended to handle births, deaths, and newborn vaccination.
+This is a stochastic, discrete-event simulation that provides an exact trajectory for the system's state evolution. It is computationally more efficient than an ABM for well-mixed populations. Like the ODE model, it has been extended to handle births, deaths, and newborn vaccination. It also models disease-specific death as a distinct event type, where an infected individual is replaced by a susceptible one.
 
 ## Getting Started
 

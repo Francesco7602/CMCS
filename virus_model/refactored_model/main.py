@@ -40,7 +40,16 @@ from mesa.batchrunner import batch_run
 
 from .constants import (
     STATE_EMPTY, SHORT_LABELS, AGENT_COLORS, GRID_CMAP, OUTPUT_DIR,
-    STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC,
+    STATE_INFECTED_ASYMPTOMATIC, STATE_INFECTED_SYMPTOMATIC, MU_GROUP,
+    CHILD, TEEN, ADULT, SENIOR,
+)
+
+# Calculate average disease mortality rate based on age distribution
+# This matches the distribution used in VirusModel's __init__ for age groups
+AGE_DISTRIBUTION_WEIGHTS = [0.1, 0.1, 0.6, 0.2]
+AVG_MU_DISEASE = sum(
+    MU_GROUP[i] * AGE_DISTRIBUTION_WEIGHTS[i]
+    for i in [CHILD, TEEN, ADULT, SENIOR]
 )
 from .ode import seir_ode
 from .model import VirusModel
@@ -165,7 +174,7 @@ async def run_live_simulation():
     vax_pct_ode = p["vax_pct"] if (is_long_term and p["vax_strat"] != "none") else 0.0
 
     # Chiamata ODE aggiornata
-    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, vax_pct_ode))
+    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, AVG_MU_DISEASE, vax_pct_ode))
     #ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
     ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
     ode_data.set(ode_curr)
@@ -184,8 +193,9 @@ async def run_live_simulation():
         p["gamma"],
         sigma,
         steps,
-        current_mu,  # <--- Nuovo parametro
-        vax_pct_gillespie  # <--- Nuovo parametro
+        current_mu,
+        AVG_MU_DISEASE,  # <--- Nuovo parametro
+        vax_pct_gillespie
     )
     gillespie_data.set(g_df)
 
