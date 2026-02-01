@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_disease=0.0, vax_pct=0.0):
+def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_disease=0.0, vax_pct=0.0, lockdown_enabled=False, lockdown_thresh=0.2, p_lock=1.0):
     """
     Executes a SEIR simulation using the Gillespie Stochastic Simulation Algorithm (SSA)
     extended with Vital Dynamics (Births/Deaths).
@@ -21,7 +21,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
     E = initial_infected_count
     I = 0
     S = N - E - I - initial_vaccinated
-    R = initial_vaccinated
+    R = N - S - E - I
 
     t = 0.0
 
@@ -33,9 +33,14 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
     R_hist = [R]
 
     while t < max_steps:
+        # Controllo soglia dinamico per Gillespie
+        p_t = p_lock if (lockdown_enabled and (I / N) >= lockdown_thresh) else 1.0
+
+        # Ricalcolo rate con p_t attuale
+        rate_infection = (beta * p_t * S * I) / N
         # --- 1. Calcolo Propensities (Rates) ---
         # Rate Epidemici
-        rate_infection = (beta * S * I) / N
+        #rate_infection = (beta * S * I) / N
         rate_progression = sigma * E
         rate_recovery = gamma * I
         rate_disease_death = mu_disease * I  # Morte per malattia

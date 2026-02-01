@@ -1,7 +1,15 @@
 # virus_model/refactored_model/ode.py
 
-def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0):
+def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, lockdown_enabled=False, lockdown_thresh=0.2, p_lock=1.0):
     S, E, I, R = y
+
+    # Calcolo p(t) dinamico: se gli infetti superano la soglia, applica p_lock
+    # Usiamo la percentuale (I / N) per confrontarla con la soglia della UI
+    p_t = 1.0
+    if lockdown_enabled and (I / N) >= lockdown_thresh:
+        p_t = p_lock
+
+    infection = (beta * p_t) * S * I / N
 
     # Flussi vitali (Nati)
     births = mu * N
@@ -9,7 +17,7 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0):
     new_susceptibles = births * (1 - vax_pct)  # I restanti sono suscettibili
 
     # Flussi Epidemici
-    infection = beta * S * I / N
+    #infection = beta * S * I / N
     progression = sigma * E
     recovery = gamma * I
     disease_death = mu_disease * I  # Morte specifica per malattia

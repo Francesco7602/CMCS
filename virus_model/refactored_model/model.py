@@ -146,18 +146,25 @@ class VirusModel(Model):
                 comm_agents = self.grid.get_cell_list_contents(list(comm))
                 infected_detected = sum(1 for a in comm_agents if a.state == STATE_INFECTED_SYMPTOMATIC)
                 pct_detected = infected_detected / len(comm_agents)
-                self.community_social_distancing[i] = min(self.lockdown_max_sd, (pct_detected / self.lockdown_threshold_pct) * self.lockdown_max_sd)
-                if self.community_social_distancing[i] > self.lockdown_active_threshold:
+                # Meccanismo a Soglia con Isteresi
+                if pct_detected >= self.lockdown_threshold_pct:
+                    self.community_social_distancing[i] = self.lockdown_max_sd
+                elif pct_detected < (self.lockdown_threshold_pct * 0.5):
+                    self.community_social_distancing[i] = 0.0
+
+                if self.community_social_distancing[i] > 0:
                     self.lockdown_active = True
         else:
-            infected_detected = self.i_symp_count
-            pct_detected = infected_detected / self.N
+            # Calcolo globale basato solo sui sintomatici
+            pct_detected = self.i_symp_count / self.N
 
-            # Adaptive lockdown
-            self.social_distancing = min(self.lockdown_max_sd, (pct_detected / self.lockdown_threshold_pct) * self.lockdown_max_sd)
-            if self.social_distancing > self.lockdown_active_threshold:
+            # Se i sintomatici superano la soglia, lockdown massimo immediato
+            if pct_detected >= self.lockdown_threshold_pct:
+                self.social_distancing = self.lockdown_max_sd
                 self.lockdown_active = True
-            else:
+            # Si riapre solo quando i sintomatici sono calati drasticamente
+            elif pct_detected < (self.lockdown_threshold_pct * 0.5):
+                self.social_distancing = 0.0
                 self.lockdown_active = False
 
         self.datacollector.collect(self)

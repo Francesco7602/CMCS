@@ -162,6 +162,7 @@ async def run_live_simulation():
     # 2. ODE & Gillespie (Background)
     CORRECT_N = model.N
     t_ode = np.linspace(0, steps, steps)
+    p_lock_value = 1.0 - p["lockdown_max_sd"]
 
     # Calcolo Condizioni Iniziali (Vaccinazione Statica al tempo 0)
     # Questa c'è SEMPRE se vax_strat != 'none', sia breve che lungo termine.
@@ -174,8 +175,11 @@ async def run_live_simulation():
     vax_pct_ode = p["vax_pct"] if (is_long_term and p["vax_strat"] != "none") else 0.0
 
     # Chiamata ODE aggiornata
-    ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, AVG_MU_DISEASE, vax_pct_ode))
-    #ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"]))
+    #ret = odeint(seir_ode, y0, t_ode, args=(CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, AVG_MU_DISEASE, vax_pct_ode))
+    ret = odeint(seir_ode, y0, t_ode, args=(
+        CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, AVG_MU_DISEASE, vax_pct_ode,
+        p["lockdown_enabled"], p["lockdown_thresh"], p_lock_value
+    ))
     ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
     ode_data.set(ode_curr)
 
@@ -195,7 +199,10 @@ async def run_live_simulation():
         steps,
         current_mu,
         AVG_MU_DISEASE,  # <--- Nuovo parametro
-        vax_pct_gillespie
+        vax_pct_gillespie,
+        p["lockdown_enabled"],
+        p["lockdown_thresh"],
+        p_lock_value
     )
     gillespie_data.set(g_df)
 
@@ -346,6 +353,7 @@ async def run_parameter_sweep():
     param_map = {
         "vax_pct": "vaccine_pct",
         "prob_symp": "prob_symptomatic",
+        "lockdown_thresh": "lockdown_threshold_pct",
     }
     sweep_model_param = param_map.get(sw["parameter"], sw["parameter"])
     model_params[sweep_model_param] = vals
@@ -623,7 +631,7 @@ def Dashboard():
             with solara.lab.Tab("Sweep"):
                 with solara.Card():
                     solara.Select("Parametro", value=sweep_params.value["parameter"],
-                                  values=["beta", "gamma", "vax_pct", "prob_symp"],
+                                  values=["beta", "gamma", "vax_pct", "prob_symp", "lockdown_thresh"],
                                   on_value=lambda v: sweep_params.set({**sweep_params.value, "parameter": v}))
                     with solara.Row():
                         solara.InputFloat("Min", value=sweep_params.value["start"],
