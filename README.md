@@ -22,6 +22,8 @@ The key feature of this tool is the simultaneous comparison of three distinct mo
     - **Watts-Strogatz:** A small-world network.
     - **Erdos-Renyi:** A random graph.
     - **Communities:** A network with distinct communities, enabling targeted interventions.
+- **Multiple Agent Schedulers:**
+  - Includes various agent activation regimes to model different assumptions about time and agent concurrency: `Simultaneous`, `Random`, `Uniform`, and `Poisson`.
 - **Dynamic & Long-Term Policies:**
   - **Vital Dynamics:** Simulates birth and death processes (`mu` parameter) to model open populations in long-term scenarios (e.g., >1 year).
   - **Disease-Specific Mortality:** Models a Case Fatality Rate (`mu_disease`) where infected agents can die from the disease. Deceased agents are replaced by new susceptible agents to maintain a constant population, distinct from the general birth/death rate.

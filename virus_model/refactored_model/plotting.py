@@ -1,4 +1,9 @@
 # virus_model/refactored_model/plotting.py
+"""
+This file contains utility functions for generating and saving plots of the
+simulation results. It uses Matplotlib to create visualizations for single runs,
+batch analyses, and parameter sweeps.
+"""
 
 import os
 import time
@@ -16,24 +21,43 @@ from .constants import (
 )
 
 def save_single_run_results(model, df, ode_data, gillespie_data):
+    """
+    Generates and saves a comprehensive report for a single simulation run.
+
+    The report includes three plots:
+    1.  Epidemic curves (ABM vs. ODE vs. Gillespie).
+    2.  The final spatial state of the model (grid or network).
+    3.  A Petri net diagram representing the final distribution of agents.
+
+    Args:
+        model (VirusModel): The completed model instance.
+        df (pd.DataFrame): The data collected from the ABM run.
+        ode_data (dict): The data from the ODE simulation.
+        gillespie_data (pd.DataFrame): The data from the Gillespie simulation.
+
+    Returns:
+        tuple: A tuple of file paths for the saved plots (curves, map, petri).
+    """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-    # --- CURVE ---
-    fig1 = plt.figure(figsize=(10, 5))
-    ax1 = fig1.add_subplot(111)
+    # --- 1. Epidemic Curves Plot ---
+    fig1, ax1 = plt.subplots(figsize=(10, 5))
 
+    # Plot ODE results (dashed lines)
     if ode_data is not None:
         ax1.plot(ode_data["t"], ode_data["S"] / model.N * 100, '--', color=AGENT_COLORS[0], alpha=0.5, label="S (ODE)")
         ax1.plot(ode_data["t"], ode_data["E"] / model.N * 100, '--', color=AGENT_COLORS[1], alpha=0.5, label="E (ODE)")
         ax1.plot(ode_data["t"], ode_data["I"] / model.N * 100, '--', color=AGENT_COLORS[3], alpha=0.5, label="I (ODE)")
         ax1.plot(ode_data["t"], ode_data["R"] / model.N * 100, '--', color=AGENT_COLORS[4], alpha=0.5, label="R (ODE)")
 
+    # Plot Gillespie results (dotted lines)
     if gillespie_data is not None:
         ax1.plot(gillespie_data["time"], gillespie_data["S"] / model.N * 100, ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
         ax1.plot(gillespie_data["time"], gillespie_data["E"] / model.N * 100, ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
         ax1.plot(gillespie_data["time"], gillespie_data["I"] / model.N * 100, ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
         ax1.plot(gillespie_data["time"], gillespie_data["R"] / model.N * 100, ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
 
+    # Plot ABM results (solid lines)
     if not df.empty:
         ax1.plot(df.index, df["S"] / model.N * 100, label="S (ABM)", color=AGENT_COLORS[0])
         ax1.plot(df.index, df["E"] / model.N * 100, label="E (ABM)", color=AGENT_COLORS[1])
@@ -48,7 +72,7 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     ax1.set_title("Run Report (ABM vs ODE vs Gillespie)")
     ax1.set_xlim(0, max(df.index) if not df.empty else 100)
     ax1.set_ylim(0, 100)
-    ax1.set_ylabel("Popolazione (%)")
+    ax1.set_ylabel("Population (%)")
     ax1.legend(loc="best", fontsize='small')
     ax1.grid(True, alpha=0.3)
 
@@ -56,21 +80,20 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     fig1.savefig(path_curves, dpi=150, bbox_inches='tight')
     plt.close(fig1)
 
-    # --- MAPPA / GRIGLIA ---
-    fig2 = plt.figure(figsize=(6, 5))
-    ax2 = fig2.add_subplot(111)
+    # --- 2. Final State Map/Grid Plot ---
+    fig2, ax2 = plt.subplots(figsize=(6, 5))
 
-    if model.G is not None:
+    if model.G is not None: # Network topology
         colors = [AGENT_COLORS[a.state] for a in model.agents]
         pos = model.layout if model.layout is not None else nx.spring_layout(model.G, seed=42)
         nx.draw(model.G, pos=pos, ax=ax2, node_size=50, node_color=colors, width=0.5, edge_color="#CCCCCC")
-        ax2.set_title(f"Stato Finale Rete - {timestamp}")
-    else:
+        ax2.set_title(f"Final Network State - {timestamp}")
+    else: # Grid topology
         grid_arr = np.full((model.grid.width, model.grid.height), STATE_EMPTY)
         for a in model.agents:
             grid_arr[a.pos] = a.state
         ax2.imshow(grid_arr, cmap=GRID_CMAP, vmin=-1, vmax=4, interpolation="nearest")
-        ax2.set_title(f"Stato Finale Griglia - {timestamp}")
+        ax2.set_title(f"Final Grid State - {timestamp}")
         
     legend_elements = [Patch(facecolor=c, edgecolor='k', label=l) for c, l in zip(AGENT_COLORS, SHORT_LABELS)]
     ax2.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.35, 1), fontsize='x-small')
@@ -79,15 +102,13 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     fig2.savefig(path_map, dpi=150, bbox_inches='tight')
     plt.close(fig2)
 
-    # --- RETE DI PETRI ---
-    fig3 = plt.figure(figsize=(6, 5))
-    ax3 = fig3.add_subplot(111)
+    # --- 3. Petri Net Plot ---
+    fig3, ax3 = plt.subplots(figsize=(6, 5))
     if not df.empty:
         latest = df.iloc[-1]
-        S, E, I, R = latest["S"], latest["E"], latest["I_asymp"] + latest["I_symp"], latest["R"]
-        draw_petri_net(ax3, S, E, I, R)
-        ax3.set_title(f"Rete di Petri (Stato Finale) - {timestamp}")
-    
+        S, E, I_asymp, I_symp, R = latest["S"], latest["E"], latest["I_asymp"], latest["I_symp"], latest["R"]
+        draw_petri_net(ax3, S, E, I_asymp, I_symp, R)
+
     path_petri = os.path.join(OUTPUT_DIR, f"run_{timestamp}_petri.png")
     fig3.savefig(path_petri, dpi=150, bbox_inches='tight')
     plt.close(fig3)
@@ -95,93 +116,133 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     return path_curves, path_map, path_petri
 
 
-# In plotting.py
-
 def save_batch_results_plot(peaks, threshold=None):
+    """
+    Saves a histogram of the epidemic peaks from a batch run.
+
+    Args:
+        peaks (list): A list of the maximum number of infected individuals from each run.
+        threshold (int, optional): A risk threshold to display as a vertical line. Defaults to None.
+
+    Returns:
+        str: The file path of the saved histogram plot.
+    """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    fig3 = plt.figure(figsize=(10, 6))
-    ax3 = fig3.add_subplot(111)
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Istogramma
-    ax3.hist(peaks, bins=15, color="purple", alpha=0.7, edgecolor='black')
+    # Histogram of peaks
+    ax.hist(peaks, bins=15, color="purple", alpha=0.7, edgecolor='black')
 
-    # Linea Soglia (se passata)
+    # Threshold line
     if threshold is not None:
-        ax3.axvline(threshold, color='r', linestyle='--', linewidth=2, label=f"Soglia ({threshold})")
-        ax3.legend()
+        ax.axvline(threshold, color='r', linestyle='--', linewidth=2, label=f"Threshold ({threshold})")
+        ax.legend()
 
-    ax3.set_title(f"Analisi Stocastica Batch ({len(peaks)} runs) - {timestamp}")
-    ax3.set_xlabel("Picco Massimo Infetti")
-    ax3.set_ylabel("Frequenza")
-    ax3.grid(axis='y', alpha=0.5, linestyle='--')
+    ax.set_title(f"Stochastic Batch Analysis ({len(peaks)} runs) - {timestamp}")
+    ax.set_xlabel("Maximum Infected Peak")
+    ax.set_ylabel("Frequency")
+    ax.grid(axis='y', alpha=0.5, linestyle='--')
 
     path_batch = os.path.join(OUTPUT_DIR, f"batch_{timestamp}_histogram.png")
-    fig3.savefig(path_batch, dpi=150, bbox_inches='tight')
-    plt.close(fig3)
+    fig.savefig(path_batch, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
     return path_batch
 
-def draw_petri_net(ax, S, E, I, R):
+
+def draw_petri_net(ax, S, E, I_asymp, I_symp, R):
+    """
+    Draws a Petri net diagram on a given Matplotlib Axes object.
+
+    The diagram visualizes the flow of agents between SEIR compartments.
+
+    Args:
+        ax (matplotlib.axes.Axes): The axes to draw on.
+        S (int): Number of agents in the Susceptible compartment.
+        E (int): Number of agents in the Exposed compartment.
+        I_asymp (int): Number of asymptomatic Infected agents.
+        I_symp (int): Number of symptomatic Infected agents.
+        R (int): Number of agents in the Recovered compartment.
+    """
     ax.clear()
 
-    # Posizioni fisse per posti e transizioni
+    # Layout parameters
+    x_space, y_space = 0.22, 0.35
+    r_node = 0.06
+    width_t, height_t = 0.14, 0.09
+    x0, y0 = 0.08, 0.5
+
+    # Define places (compartments) and transitions
     places = {
-        'S': {'pos': (0.1, 0.5), 'count': S, 'color': AGENT_COLORS[0]},
-        'E': {'pos': (0.4, 0.8), 'count': E, 'color': AGENT_COLORS[1]},
-        'I': {'pos': (0.7, 0.5), 'count': I, 'color': AGENT_COLORS[3]},
-        'R': {'pos': (0.4, 0.2), 'count': R, 'color': AGENT_COLORS[4]}
+        'S': {'pos': (x0, y0), 'count': S, 'color': AGENT_COLORS[0]},
+        'E': {'pos': (x0 + 2 * x_space, y0), 'count': E, 'color': AGENT_COLORS[1]},
+        'I_asymp': {'pos': (x0 + 3.5 * x_space, y0 + y_space), 'count': I_asymp, 'color': AGENT_COLORS[2]},
+        'I_symp': {'pos': (x0 + 3.5 * x_space, y0 - y_space), 'count': I_symp, 'color': AGENT_COLORS[3]},
+        'R': {'pos': (x0 + 5 * x_space, y0), 'count': R, 'color': AGENT_COLORS[4]}
     }
     transitions = {
-        'infettare': {'pos': (0.25, 0.65), 'label': 'β'},
-        'incubare': {'pos': (0.55, 0.65), 'label': 'σ'},
-        'guarire': {'pos': (0.55, 0.35), 'label': 'γ'}
+        'T1': {'pos': (x0 + x_space, y0), 'label': 'β'},
+        'T2': {'pos': (x0 + 2.75 * x_space, y0 + 0.5 * y_space), 'label': 'σ(1-p)'},
+        'T3': {'pos': (x0 + 2.75 * x_space, y0 - 0.5 * y_space), 'label': 'σ*p'},
+        'T4': {'pos': (x0 + 4.25 * x_space, y0 + 0.5 * y_space), 'label': 'γ'},
+        'T5': {'pos': (x0 + 4.25 * x_space, y0 - 0.5 * y_space), 'label': 'γ'}
     }
-    
-    # Disegna posti (cerchi)
-    for name, p in places.items():
-        circle = plt.Circle(p['pos'], radius=0.1, facecolor=p['color'], edgecolor='black', alpha=0.7)
-        ax.add_patch(circle)
-        ax.text(p['pos'][0], p['pos'][1], f"{p['count']}", ha='center', va='center', fontsize=12, color='white', weight='bold')
-        ax.text(p['pos'][0], p['pos'][1] - 0.15, name, ha='center', va='center', fontsize=12)
+    edges = [
+        (('p', 'S'), ('t', 'T1')), (('t', 'T1'), ('p', 'E')),
+        (('p', 'E'), ('t', 'T2')), (('t', 'T2'), ('p', 'I_asymp')),
+        (('p', 'E'), ('t', 'T3')), (('t', 'T3'), ('p', 'I_symp')),
+        (('p', 'I_asymp'), ('t', 'T4')), (('t', 'T4'), ('p', 'R')),
+        (('p', 'I_symp'), ('t', 'T5')), (('t', 'T5'), ('p', 'R'))
+    ]
 
-    # Disegna transizioni (rettangoli)
-    for name, t in transitions.items():
-        rect = plt.Rectangle((t['pos'][0] - 0.05, t['pos'][1] - 0.05), 0.1, 0.1, facecolor='gray', edgecolor='black')
+    # Draw transitions (rectangles)
+    for t in transitions.values():
+        rect = plt.Rectangle((t['pos'][0] - width_t / 2, t['pos'][1] - height_t / 2),
+                             width_t, height_t, facecolor='gray', edgecolor='black', zorder=4)
         ax.add_patch(rect)
-        ax.text(t['pos'][0], t['pos'][1], t['label'], ha='center', va='center', fontsize=14, color='white')
+        ax.text(t['pos'][0], t['pos'][1], t['label'], ha='center', va='center',
+                fontsize=9, color='white', weight='bold', zorder=5)
 
-    # Disegna archi (frecce)
-    # S -> infettare (beta)
-    ax.arrow(0.2, 0.5, 0.05, 0.1, head_width=0.02, head_length=0.02, fc='k', ec='k') 
-    # infettare (beta) -> E
-    ax.arrow(0.25, 0.7, 0.1, 0.05, head_width=0.02, head_length=0.02, fc='k', ec='k') 
-    # E -> incubare (sigma)
-    ax.arrow(0.47, 0.73, 0.03, -0.03, head_width=0.02, head_length=0.02, fc='k', ec='k') 
-    # incubare (sigma) -> I
-    ax.arrow(0.6, 0.65, 0, -0.1, head_width=0.02, head_length=0.02, fc='k', ec='k') 
-    # I -> guarire (gamma)
-    ax.arrow(0.63, 0.43, -0.03, -0.05, head_width=0.02, head_length=0.02, fc='k', ec='k') 
-    # guarire (gamma) -> R
-    ax.arrow(0.5, 0.35, -0.05, -0.1, head_width=0.02, head_length=0.02, fc='k', ec='k')
-    
-    ax.set_xlim(0, 1)
+    # Draw places (circles) and their labels
+    for name, p in places.items():
+        circle = plt.Circle(p['pos'], radius=r_node, facecolor=p['color'], edgecolor='black', alpha=0.8, zorder=4)
+        ax.add_patch(circle)
+        ax.text(p['pos'][0], p['pos'][1], f"{int(p['count'])}", ha='center', va='center',
+                fontsize=9, color='white', weight='bold', zorder=5)
+        label_y_offset = 0.12 if name == 'I_asymp' else -0.12
+        ax.text(p['pos'][0], p['pos'][1] + label_y_offset, name,
+                ha='center', va='center', fontsize=10, weight='bold')
+
+    # Draw edges (arrows) between places and transitions
+    for start, end in edges:
+        src_pos = places[start[1]]['pos'] if start[0] == 'p' else transitions[start[1]]['pos']
+        dst_pos = places[end[1]]['pos'] if end[0] == 'p' else transitions[end[1]]['pos']
+        ax.annotate("", xy=dst_pos, xytext=src_pos,
+                    arrowprops=dict(arrowstyle="->", color="black", lw=1.2,
+                                    shrinkA=18, shrinkB=18, mutation_scale=12), zorder=3)
+
+    ax.set_xlim(0, 1.3)
     ax.set_ylim(0, 1)
     ax.axis('off')
 
-
-# virus_model/refactored_model/plotting.py
-
 def save_sweep_results_plot(results, param_name):
     """
-    Salva il grafico del parameter sweep.
-    results: lista di tuple (valore_parametro, picco_infetti)
-    param_name: nome del parametro analizzato (es. 'beta')
+    Saves a plot of the results from a parameter sweep.
+
+    The plot shows how the average epidemic peak changes as the specified
+    parameter is varied.
+
+    Args:
+        results (list): A list of tuples, where each tuple is `(parameter_value, avg_peak)`.
+        param_name (str): The name of the parameter that was swept (e.g., 'beta').
+
+    Returns:
+        str: The file path of the saved plot.
     """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-
     fig, ax = plt.subplots(figsize=(8, 4))
 
-    # Separa x (valore parametro) e y (picco)
+    # Unpack the results into x and y values
     x_val = [r[0] for r in results]
     y_val = [r[1] for r in results]
 
@@ -189,10 +250,9 @@ def save_sweep_results_plot(results, param_name):
 
     ax.set_title(f"Parameter Sweep: {param_name} - {timestamp}")
     ax.set_xlabel(param_name)
-    ax.set_ylabel("Picco Infetti (Max)")
+    ax.set_ylabel("Average Infection Peak (Max)")
     ax.grid(True, linestyle='--', alpha=0.7)
 
-    # Costruisci nome file univoco
     filename = f"sweep_{param_name}_{timestamp}.png"
     plot_path = os.path.join(OUTPUT_DIR, filename)
 

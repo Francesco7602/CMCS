@@ -1,3 +1,7 @@
 mesa
 scipy
 matplotlib
+solara
+numpy
+pandas
+networkx

@@ -1,11 +1,18 @@
 # virus_model/refactored_model/model.py
+"""
+This file defines the main Agent-Based Model (ABM), `VirusModel`.
+
+The `VirusModel` class encapsulates the entire simulation world, including the agents,
+the spatial environment (grid or network), and the rules governing their interactions
+and state transitions. It manages the simulation step, data collection, and the
+implementation of interventions like vaccination and lockdowns.
+"""
 
 import networkx as nx
 import numpy as np
 from mesa import Model
 from mesa.space import MultiGrid, NetworkGrid
 from mesa.datacollection import DataCollector
-
 from networkx.algorithms import community
 
 from .agent import VirusAgent
@@ -13,6 +20,11 @@ from .constants import *
 
 
 class VirusModel(Model):
+    """
+    The main model for the virus spread simulation.
+
+    It initializes the environment, creates agents, and manages the simulation loop.
+    """
     def __init__(self, N=300, width=20, height=20,
                  beta=0.5, gamma=0.1, incubation_mean=3,
                  topology="grid",
@@ -21,7 +33,29 @@ class VirusModel(Model):
                  scheduler_type="random",
                  prob_symptomatic=0.6,
                  lockdown_threshold_pct=0.2, lockdown_max_sd=0.9, lockdown_active_threshold=0.1, mu=0.0):
+        """
+        Initializes the VirusModel.
 
+        Args:
+            N (int): The number of agents.
+            width (int), height (int): Dimensions for the grid topology.
+            beta (float): Transmission rate.
+            gamma (float): Recovery rate.
+            incubation_mean (int): Average incubation period.
+            topology (str): The spatial structure ('grid', 'watts_strogatz', etc.).
+            ws_k (int), ws_p (float): Parameters for Watts-Strogatz graphs.
+            er_p (float): Parameter for Erdős-Rényi graphs.
+            ba_m (int): Parameter for Barabási-Albert graphs.
+            comm_l (int), comm_k (int): Parameters for community graphs.
+            vaccine_strategy (str): Vaccination strategy ('none', 'random', 'targeted').
+            vaccine_pct (float): Percentage of the population to vaccinate.
+            scheduler_type (str): The agent activation regime ('random', 'simultaneous', etc.).
+            prob_symptomatic (float): Probability of developing symptoms.
+            lockdown_threshold_pct (float): Infection percentage to trigger lockdown.
+            lockdown_max_sd (float): Maximum social distancing factor during lockdown.
+            lockdown_active_threshold (float): Threshold to deactivate lockdown.
+            mu (float): Natural birth/death rate for vital dynamics.
+        """
         super().__init__()
         self.layout = None
         self.mu = mu
@@ -48,6 +82,7 @@ class VirusModel(Model):
         self.lockdown_max_sd = lockdown_max_sd
         self.lockdown_active_threshold = lockdown_active_threshold
 
+        # --- Compartment Counts ---
         self.s_count = 0
         self.e_count = 0
         self.i_asymp_count = 0
@@ -57,6 +92,7 @@ class VirusModel(Model):
         self.communities = None
         self.community_social_distancing = {}
 
+        # --- Environment Setup ---
         if topology in ["network", "watts_strogatz", "erdos_renyi", "communities"]:
             if topology == "watts_strogatz":
                 self.G = nx.watts_strogatz_graph(self.N, k=ws_k, p=ws_p)
@@ -70,16 +106,15 @@ class VirusModel(Model):
             else:  # Default to Barabasi-Albert
                 self.G = nx.barabasi_albert_graph(self.N, ba_m)
             self.grid = NetworkGrid(self.G)
-        else:
+        else: # Default to grid
             self.G = None
             self.grid = MultiGrid(width, height, torus=True)
 
         if self.G is not None:
-            # Calcoliamo le posizioni UNA volta sola all'avvio.
-            # spring_layout è bello ma lento, calcolarlo qui evita di farlo nel loop.
-            # Usiamo seed=42 per coerenza visiva.
+            # Pre-calculate layout for network visualizations to improve performance.
             self.layout = nx.spring_layout(self.G, seed=42)
 
+        # --- Agent Creation ---
         for i in range(self.N):
             age_group = self.random.choices(
                 [CHILD, TEEN, ADULT, SENIOR],
@@ -100,6 +135,7 @@ class VirusModel(Model):
                 y = self.random.randrange(height)
                 self.grid.place_agent(a, (x, y))
 
+        # --- Initial Conditions ---
         self.apply_vaccination(vaccine_strategy, vaccine_pct)
 
         susceptible_agents = [a for a in self.agents if a.state == STATE_SUSCEPTIBLE]
@@ -107,11 +143,13 @@ class VirusModel(Model):
             patient_zero = self.random.choice(susceptible_agents)
             patient_zero.state = STATE_EXPOSED
 
+        # --- Initialize Compartment Counts ---
         for a in self.agents:
             if a.state == STATE_SUSCEPTIBLE: self.s_count += 1
             elif a.state == STATE_EXPOSED: self.e_count += 1
             elif a.state == STATE_RECOVERED: self.r_count += 1
             
+        # --- Data Collection ---
         self.datacollector = DataCollector(
             model_reporters={
                 "S": lambda m: m.s_count,
@@ -124,29 +162,49 @@ class VirusModel(Model):
         )
 
     def apply_vaccination(self, strategy, pct):
+        """
+        Applies a vaccination strategy to a percentage of the population.
+
+        Args:
+            strategy (str): The vaccination strategy ('random' or 'targeted').
+            pct (float): The fraction of the population to vaccinate.
+        """
         num_vax = int(self.N * pct)
         if num_vax == 0: return
+        
         targets = []
         if strategy == "random":
             targets = self.random.sample(list(self.agents), num_vax)
-        elif strategy == "targeted" and self.G is not None:
-            degrees = dict(self.G.degree())
-            sorted_nodes = sorted(degrees, key=degrees.get, reverse=True)
-            top_nodes = sorted_nodes[:num_vax]
-            targets = self.grid.get_cell_list_contents(top_nodes)
         elif strategy == "targeted":
-            targets = self.random.sample(list(self.agents), num_vax)
+            if self.G is not None: # Targeted vaccination based on node degree in networks
+                degrees = dict(self.G.degree())
+                sorted_nodes = sorted(degrees, key=degrees.get, reverse=True)
+                top_nodes = sorted_nodes[:num_vax]
+                targets = self.grid.get_cell_list_contents(top_nodes)
+            else: # Fallback to random for grid topology
+                targets = self.random.sample(list(self.agents), num_vax)
+                
         for a in targets:
-            a.state = STATE_RECOVERED
+            if a.state == STATE_SUSCEPTIBLE:
+                a.state = STATE_RECOVERED
 
     def step(self):
+        """
+        Executes one time step of the simulation.
+        
+        This involves updating lockdown status, collecting data, activating agents
+        according to the chosen scheduler, and handling vital dynamics (births/deaths).
+        """
+        # --- Lockdown and Social Distancing Logic ---
         if self.topology == "communities":
             self.lockdown_active = False
             for i, comm in enumerate(self.communities):
                 comm_agents = self.grid.get_cell_list_contents(list(comm))
+                if not comm_agents: continue
                 infected_detected = sum(1 for a in comm_agents if a.state == STATE_INFECTED_SYMPTOMATIC)
                 pct_detected = infected_detected / len(comm_agents)
-                # Meccanismo a Soglia con Isteresi
+                
+                # Hysteresis mechanism for lockdown
                 if pct_detected >= self.lockdown_threshold_pct:
                     self.community_social_distancing[i] = self.lockdown_max_sd
                 elif pct_detected < (self.lockdown_threshold_pct * 0.5):
@@ -154,103 +212,90 @@ class VirusModel(Model):
 
                 if self.community_social_distancing[i] > 0:
                     self.lockdown_active = True
-        else:
-            # Calcolo globale basato solo sui sintomatici
+        else: # Global lockdown logic
             pct_detected = self.i_symp_count / self.N
-
-            # Se i sintomatici superano la soglia, lockdown massimo immediato
+            
             if pct_detected >= self.lockdown_threshold_pct:
                 self.social_distancing = self.lockdown_max_sd
                 self.lockdown_active = True
-            # Si riapre solo quando i sintomatici sono calati drasticamente
-            elif pct_detected < (self.lockdown_threshold_pct * 0.5):
+            elif pct_detected < (self.lockdown_threshold_pct * 0.5): # Hysteresis
                 self.social_distancing = 0.0
                 self.lockdown_active = False
 
         self.datacollector.collect(self)
 
+        # --- Agent Activation ---
         if self.scheduler_type == "random":
             self.agents.shuffle_do("step_sequential")
-        if self.scheduler_type == "simultaneous":
-            self.agents.do("step_sequential")  # Prima fase: sensing
-            self.agents.do("advance")          # Seconda fase: apply changes
+        elif self.scheduler_type == "simultaneous":
+            self.agents.do("step_sensing")
+            self.agents.do("step_apply")
         elif self.scheduler_type == "uniform":
-            self.agents.do("step_sequential")  # Esecuzione in ordine deterministico
+            self.agents.do("step_sequential")
         elif self.scheduler_type == "poisson":
-            # Seleziona un sottoinsieme casuale di agenti per questo step
-            active_fraction = np.random.poisson(0.5) / self.N  # Media 0.5 agenti per step
+            active_fraction = np.random.poisson(0.5) / self.N
             n_active = max(1, int(active_fraction * self.N))
             active_agents = self.random.sample(list(self.agents), min(n_active, len(self.agents)))
-
             for agent in active_agents:
                 agent.step_sequential()
-        else:
-            # Fallback per altri tipi
+        else: # Fallback to simultaneous
             self.agents.do("step_sensing")
             self.agents.do("step_apply")
 
-            # --- NUOVA LOGICA: VITAL DYNAMICS (Nascite/Morti) ---
+        # --- Vital Dynamics (Births/Deaths) ---
         if self.mu > 0:
-            # Calcola quanti muoiono in questo step (distribuzione binomiale)
             n_deaths = self.np_random.binomial(self.N, self.mu)
-
             if n_deaths > 0:
-                # Scegli a caso chi muore
                 agents_list = list(self.agents)
                 dying_agents = self.random.sample(agents_list, n_deaths)
 
                 for agent in dying_agents:
-                    # 1. Aggiorna contatori (rimuovi stato vecchio)
-                    if agent.state == STATE_SUSCEPTIBLE:
-                        self.s_count -= 1
-                    elif agent.state == STATE_EXPOSED:
-                        self.e_count -= 1
-                    elif agent.state == STATE_INFECTED_ASYMPTOMATIC:
-                        self.i_asymp_count -= 1
-                    elif agent.state == STATE_INFECTED_SYMPTOMATIC:
-                        self.i_symp_count -= 1
-                    elif agent.state == STATE_RECOVERED:
-                        self.r_count -= 1
-
-                    # 2. Respawn (Il "figlio" prende il posto del "morto")
-                    # Decide se nasce vaccinato
-                    if self.random.random() < self.vaccine_pct:
-                        agent.state = 4 # STATE_RECOVERED
-                        agent._next_state = 4
-                        self.r_count += 1
-                    else:
-                        agent.state = 0 # STATE_SUSCEPTIBLE
-                        agent._next_state = 0
-                        self.s_count += 1
-
-                    # Reset contatori interni dell'agente
-                    agent.days_exposed = 0
+                    self.remove_and_respawn(agent)
         
         self.steps_count += 1
 
     def get_social_distancing(self, agent):
+        """
+        Returns the social distancing factor for a given agent.
+        
+        This can be global or community-specific depending on the topology.
+
+        Args:
+            agent (VirusAgent): The agent for which to get the factor.
+
+        Returns:
+            float: The social distancing factor (0.0 to 1.0).
+        """
         if self.topology == "communities" and agent.community is not None:
-            return self.community_social_distancing[agent.community]
+            return self.community_social_distancing.get(agent.community, 0.0)
         return self.social_distancing
 
     def remove_and_respawn(self, agent):
-        """Handle death and immediate replacement to maintain population N."""
-        # 1. Update counts for the agent's current state (decrement)
-        if agent.state == STATE_SUSCEPTIBLE:
-            self.s_count -= 1
-        elif agent.state == STATE_EXPOSED:
-            self.e_count -= 1
-        elif agent.state == STATE_INFECTED_ASYMPTOMATIC:
-            self.i_asymp_count -= 1
-        elif agent.state == STATE_INFECTED_SYMPTOMATIC:
-            self.i_symp_count -= 1
-        elif agent.state == STATE_RECOVERED:
-            self.r_count -= 1
+        """
+        Handles the death and immediate replacement of an agent to maintain population N.
 
-        # 2. Reset agent to Susceptible
-        agent.state = STATE_SUSCEPTIBLE
-        agent._next_state = STATE_SUSCEPTIBLE
-        agent.days_exposed = 0
+        This can be triggered by disease-specific mortality or natural causes. The new
+        "born" agent is reset and can be either susceptible or vaccinated.
+
+        Args:
+            agent (VirusAgent): The agent to be removed and respawned.
+        """
+        # 1. Decrement count for the agent's old state
+        if agent.state == STATE_SUSCEPTIBLE: self.s_count -= 1
+        elif agent.state == STATE_EXPOSED: self.e_count -= 1
+        elif agent.state == STATE_INFECTED_ASYMPTOMATIC: self.i_asymp_count -= 1
+        elif agent.state == STATE_INFECTED_SYMPTOMATIC: self.i_symp_count -= 1
+        elif agent.state == STATE_RECOVERED: self.r_count -= 1
+
+        # 2. Respawn: Reset the agent's state (can be born vaccinated)
+        if self.random.random() < self.vaccine_pct:
+            agent.state = STATE_RECOVERED
+            agent._next_state = STATE_RECOVERED
+            self.r_count += 1
+        else:
+            agent.state = STATE_SUSCEPTIBLE
+            agent._next_state = STATE_SUSCEPTIBLE
+            self.s_count += 1
         
-        # 3. Update counts (increment S)
-        self.s_count += 1
+        # Reset internal agent counters
+        agent.days_exposed = 0

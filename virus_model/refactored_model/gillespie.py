@@ -6,16 +6,29 @@ import pandas as pd
 
 def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_disease=0.0, vax_pct=0.0, lockdown_enabled=False, lockdown_thresh=0.2, p_lock=1.0):
     """
-    Executes a SEIR simulation using the Gillespie Stochastic Simulation Algorithm (SSA)
-    extended with Vital Dynamics (Births/Deaths).
+    Executes a SEIR simulation using the Gillespie Stochastic Simulation Algorithm (SSA).
 
-    Events handling constant population N:
-    - Infection, Progression, Recovery (Standard SEIR)
-    - Disease-specific death (I -> S)
-    - Vital Dynamics: An agent dies and is immediately replaced (Respawn).
-      The replacement is vaccinated with probability 'vax_pct', else Susceptible.
+    This version is extended to include vital dynamics (births and deaths),
+    disease-specific mortality, vaccination, and dynamic lockdowns. The total
+    population N is kept constant.
+
+    Args:
+        N (int): Total population size.
+        beta (float): The transmission rate.
+        gamma (float): The recovery rate.
+        sigma (float): The rate of progression from exposed to infected.
+        max_steps (int): The maximum simulation time.
+        mu (float, optional): The natural death rate (and birth rate). Defaults to 0.0.
+        mu_disease (float, optional): The disease-specific death rate for infected individuals. Defaults to 0.0.
+        vax_pct (float, optional): The fraction of newborns who are vaccinated. Defaults to 0.0.
+        lockdown_enabled (bool, optional): If True, dynamic lockdown rules are applied. Defaults to False.
+        lockdown_thresh (float, optional): The infected population fraction to trigger a lockdown. Defaults to 0.2.
+        p_lock (float, optional): The reduction factor for beta during a lockdown (e.g., 1.0 means no reduction). Defaults to 1.0.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the time series of S, E, I, and R compartments.
     """
-    # Stato iniziale
+    # Initial state
     initial_infected_count = 5
     initial_vaccinated = int(N * vax_pct) if vax_pct > 0 else 0
     E = initial_infected_count
@@ -25,7 +38,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
 
     t = 0.0
 
-    # History lists
+    # History lists to store simulation trajectory
     t_hist = [t]
     S_hist = [S]
     E_hist = [E]
@@ -33,29 +46,29 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
     R_hist = [R]
 
     while t < max_steps:
-        # Controllo soglia dinamico per Gillespie
+        # Dynamic lockdown threshold check for Gillespie
         p_t = p_lock if (lockdown_enabled and (I / N) >= lockdown_thresh) else 1.0
 
-        # Ricalcolo rate con p_t attuale
+        # --- 1. Calculate Propensities (Rates) for all possible events ---
+        # Recalculate infection rate with current p_t
         rate_infection = (beta * p_t * S * I) / N
-        # --- 1. Calcolo Propensities (Rates) ---
-        # Rate Epidemici
-        #rate_infection = (beta * S * I) / N
+        
+        # Epidemic rates
         rate_progression = sigma * E
         rate_recovery = gamma * I
-        rate_disease_death = mu_disease * I  # Morte per malattia
+        rate_disease_death = mu_disease * I  # Death due to disease
 
-        # Rate Vitali (Respawn logic)
+        # Vital Dynamics rates (Respawn logic)
         p = vax_pct
         q = 1.0 - p
-        rate_S_to_R = mu * S * p
-        rate_E_to_S = mu * E * q
-        rate_E_to_R = mu * E * p
-        rate_I_to_S = mu * I * q
-        rate_I_to_R = mu * I * p
-        rate_R_to_S = mu * R * q
+        rate_S_to_R = mu * S * p  # Susceptible dies, replaced by Recovered (vaccinated)
+        rate_E_to_S = mu * E * q  # Exposed dies, replaced by Susceptible
+        rate_E_to_R = mu * E * p  # Exposed dies, replaced by Recovered
+        rate_I_to_S = mu * I * q  # Infected dies, replaced by Susceptible
+        rate_I_to_R = mu * I * p  # Infected dies, replaced by Recovered
+        rate_R_to_S = mu * R * q  # Recovered dies, replaced by Susceptible
 
-        # Somma totale propensities
+        # Sum of all propensities
         total_rate = (rate_infection + rate_progression + rate_recovery + rate_disease_death +
                       rate_S_to_R + rate_E_to_S + rate_E_to_R +
                       rate_I_to_S + rate_I_to_R + rate_R_to_S)
@@ -63,7 +76,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
         if total_rate == 0:
             break
 
-        # --- 2. Tempo al prossimo evento (tau) ---
+        # --- 2. Determine time to next event (tau) ---
         r1 = np.random.rand()
         tau = (1.0 / total_rate) * np.log(1.0 / r1)
 
@@ -71,7 +84,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
             break
         t += tau
 
-        # --- 3. Scelta dell'evento ---
+        # --- 3. Choose which event occurs ---
         r2 = np.random.rand()
         threshold = r2 * total_rate
 
@@ -89,9 +102,9 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
                 else:
                     current_sum += rate_disease_death
                     if threshold < current_sum:
-                        I -= 1; S += 1  # Disease Death & Respawn
+                        I -= 1; S += 1  # Disease Death & Respawn as Susceptible
                     else:
-                        # --- Eventi Vitali ---
+                        # --- Vital Dynamics Events ---
                         current_sum += rate_S_to_R
                         if threshold < current_sum: S -= 1; R += 1
                         else:
@@ -107,16 +120,17 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
                                         current_sum += rate_I_to_R
                                         if threshold < current_sum: I -= 1; R += 1
                                         else:
-                                            current_sum += rate_R_to_S
-                                            if threshold < current_sum: R -= 1; S += 1
+                                            # This must be rate_R_to_S
+                                            R -= 1; S += 1
 
-        # Aggiorna history
+        # Update history
         t_hist.append(t)
         S_hist.append(S)
         E_hist.append(E)
         I_hist.append(I)
         R_hist.append(R)
 
+    # Ensure the history extends to max_steps for consistent plotting
     if t < max_steps:
         t_hist.append(max_steps)
         S_hist.append(S)
