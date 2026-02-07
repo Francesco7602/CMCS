@@ -1,4 +1,5 @@
-# virus_model/refactored_model/ode.py
+# virus_model/refactored_model/ode.py+
+import numpy as np
 """
 This file defines the system of Ordinary Differential Equations (ODEs) for a
 SEIR (Susceptible-Exposed-Infected-Recovered) model.
@@ -33,13 +34,19 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, l
     """
     S, E, I, R = y
 
-    # Dynamic p(t): if the number of infected individuals exceeds the threshold, apply p_lock
+    # Dynamic p(t): Smooth transition using a Sigmoid function
     p_t = 1.0
-    if lockdown_enabled and (I / N) >= lockdown_thresh:
-        p_t = p_lock
+    if lockdown_enabled:
+        # 'k' controlla la rapidità della transizione (più alto = più ripido, ma non istantaneo)
+        k = 100
+        infection_ratio = I / N
 
-    # --- Flows ---
-    
+        # Funzione Sigmoide: va da 0 a 1 in modo continuo attorno alla soglia
+        activation = 1 / (1 + np.exp(-k * (infection_ratio - lockdown_thresh)))
+
+        # Interpola tra 1.0 (normale) e p_lock (lockdown)
+        p_t = 1.0 - (1.0 - p_lock) * activation
+
     # Vital dynamics (Births)
     births = mu * N
     new_vaccinated = births * vax_pct          # A fraction 'p' of newborns are vaccinated

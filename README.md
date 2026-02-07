@@ -14,7 +14,7 @@ The key feature of this tool is the simultaneous comparison of three distinct mo
   - Adjust simulation parameters on the fly and see results instantly.
   - Live plotting of SEIR curves for all three models.
   - Visualization of agent states on a spatial grid or a network graph.
-  - A Petri net representation of the final SEIR state distribution.
+  - A Transition Schema representation of the final SEIR state distribution.
 - **Advanced ABM Topologies:**
   - **Grid:** Agents are placed on a 2D grid and can move to neighboring cells.
   - **Complex Networks:**

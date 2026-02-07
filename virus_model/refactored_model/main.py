@@ -521,7 +521,7 @@ def Dashboard():
                         solara.FigureMatplotlib(fig)
                         plt.close(fig)
 
-                        # --- Spatial Views (Grid/Network and Petri Net) ---
+                        # --- Spatial Views (Grid/Network and Transition Schema) ---
                         with solara.Row():
                             with solara.Column():
                                 solara.Markdown("**Agent Map**")
@@ -541,7 +541,7 @@ def Dashboard():
                                 plt.close(fig2)
 
                             with solara.Column():
-                                solara.Markdown("**Petri Net (Final State)**")
+                                solara.Markdown("**Transition Schema**")
                                 fig3, ax3 = plt.subplots(figsize=(5, 5))
                                 last = df.iloc[-1]
                                 draw_petri_net(ax3, last["S"], last["E"], last["I_asymp"], last["I_symp"], last["R"])

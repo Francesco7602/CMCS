@@ -27,7 +27,7 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     The report includes three plots:
     1.  Epidemic curves (ABM vs. ODE vs. Gillespie).
     2.  The final spatial state of the model (grid or network).
-    3.  A Petri net diagram representing the final distribution of agents.
+    3.  A Transition Schema diagram representing the final distribution of agents.
 
     Args:
         model (VirusModel): The completed model instance.
@@ -52,10 +52,14 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
 
     # Plot Gillespie results (dotted lines)
     if gillespie_data is not None:
-        ax1.plot(gillespie_data["time"], gillespie_data["S"] / model.N * 100, ':', color=AGENT_COLORS[0], alpha=0.9, label="S (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["E"] / model.N * 100, ':', color=AGENT_COLORS[1], alpha=0.9, label="E (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["I"] / model.N * 100, ':', color=AGENT_COLORS[3], alpha=0.9, label="I (Gillespie)")
-        ax1.plot(gillespie_data["time"], gillespie_data["R"] / model.N * 100, ':', color=AGENT_COLORS[4], alpha=0.9, label="R (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["S"] / model.N * 100, ':', color=AGENT_COLORS[0], alpha=0.9,
+                 label="S (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["E"] / model.N * 100, ':', color=AGENT_COLORS[1], alpha=0.9,
+                 label="E (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["I"] / model.N * 100, ':', color=AGENT_COLORS[3], alpha=0.9,
+                 label="I (Gillespie)")
+        ax1.plot(gillespie_data["time"], gillespie_data["R"] / model.N * 100, ':', color=AGENT_COLORS[4], alpha=0.9,
+                 label="R (Gillespie)")
 
     # Plot ABM results (solid lines)
     if not df.empty:
@@ -71,10 +75,9 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
 
     ax1.set_title("Run Report (ABM vs ODE vs Gillespie)")
     ax1.set_xlim(0, max(df.index) if not df.empty else 100)
-    ax1.set_ylim(0, 100)
-    ax1.set_ylabel("Population (%)")
-    ax1.legend(loc="best", fontsize='small')
-    ax1.grid(True, alpha=0.3)
+    ax1.set_ylabel("Population (%) - Log Scale")
+    ax1.legend(loc="upper right", fontsize='x-small', ncol=2)
+    ax1.grid(True, which="both", alpha=0.3)
 
     path_curves = os.path.join(OUTPUT_DIR, f"run_{timestamp}_curves.png")
     fig1.savefig(path_curves, dpi=150, bbox_inches='tight')
@@ -102,7 +105,7 @@ def save_single_run_results(model, df, ode_data, gillespie_data):
     fig2.savefig(path_map, dpi=150, bbox_inches='tight')
     plt.close(fig2)
 
-    # --- 3. Petri Net Plot ---
+    # --- 3. Transition Schema Plot ---
     fig3, ax3 = plt.subplots(figsize=(6, 5))
     if not df.empty:
         latest = df.iloc[-1]
@@ -152,7 +155,7 @@ def save_batch_results_plot(peaks, threshold=None):
 
 def draw_petri_net(ax, S, E, I_asymp, I_symp, R):
     """
-    Draws a Petri net diagram on a given Matplotlib Axes object.
+    Draws a Transition Schema diagram on a given Matplotlib Axes object.
 
     The diagram visualizes the flow of agents between SEIR compartments.
 
