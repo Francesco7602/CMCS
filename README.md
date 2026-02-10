@@ -1,4 +1,4 @@
-# Complex Model for Complex Systems (CMCS)
+# Computational Model for Complex Systems (CMCS)
 
 This project is a multi-model epidemiological simulator designed to explore and compare virus dynamics in a population. It provides an interactive web-based interface built with [Solara](https://solara.dev/) for configuring parameters, running simulations, and visualizing results in real-time.
 
