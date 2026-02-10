@@ -67,7 +67,7 @@ class VirusModel(Model):
             self.N = comm_l * comm_k
         else:
             self.N = N
-
+        self.total_agents_created = N
         self.width = width
         self.height = height
         self.scheduler_type = scheduler_type
@@ -91,6 +91,7 @@ class VirusModel(Model):
 
         self.communities = None
         self.community_social_distancing = {}
+        self.total_deaths = 0
 
         # --- Environment Setup ---
         if topology in ["network", "watts_strogatz", "erdos_renyi", "communities"]:
@@ -157,6 +158,8 @@ class VirusModel(Model):
                 "I_asymp": lambda m: m.i_asymp_count,
                 "I_symp": lambda m: m.i_symp_count,
                 "R": lambda m: m.r_count,
+                "Deaths": lambda m: m.total_deaths,
+                "TotalAgents": lambda m: m.total_agents_created,
                 "Lockdown": lambda m: 1 if m.lockdown_active else 0
             }
         )
@@ -270,7 +273,7 @@ class VirusModel(Model):
             return self.community_social_distancing.get(agent.community, 0.0)
         return self.social_distancing
 
-    def remove_and_respawn(self, agent):
+    def remove_and_respawn(self, agent, reason="natural"):
         """
         Handles the death and immediate replacement of an agent to maintain population N.
 
@@ -280,6 +283,9 @@ class VirusModel(Model):
         Args:
             agent (VirusAgent): The agent to be removed and respawned.
         """
+        self.total_agents_created += 1
+        if reason == "disease":
+            self.total_deaths += 1
         # 1. Decrement count for the agent's old state
         if agent.state == STATE_SUSCEPTIBLE: self.s_count -= 1
         elif agent.state == STATE_EXPOSED: self.e_count -= 1

@@ -64,11 +64,11 @@ class VirusAgent(Agent):
                 self._next_state = STATE_RECOVERED
             # Roll for mortality (Case Fatality Rate)
             elif self.random.random() < self.mu:
-                self.model.remove_and_respawn(self)
+                self.model.remove_and_respawn(self, reason="disease")
 
         # Movement logic
         # Symptomatic agents self-isolate and do not move.
-        # All others move (if not in lockdown/distancing).
+        # All others move
         if self.state != STATE_INFECTED_SYMPTOMATIC:
             if isinstance(self.model.grid, MultiGrid):
                 if self.random.random() > self.model.get_social_distancing(self):

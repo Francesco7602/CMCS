@@ -32,7 +32,7 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, l
     Returns:
         tuple: A tuple `(dSdt, dEdt, dIdt, dRdt)` representing the rate of change for each compartment.
     """
-    S, E, I, R = y
+    S, E, I, R, D = y
 
     # Dynamic p(t): Smooth transition using a Sigmoid function
     p_t = 1.0
@@ -44,7 +44,6 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, l
         # Funzione Sigmoide: va da 0 a 1 in modo continuo attorno alla soglia
         activation = 1 / (1 + np.exp(-k * (infection_ratio - lockdown_thresh)))
 
-        # Interpola tra 1.0 (normale) e p_lock (lockdown)
         p_t = 1.0 - (1.0 - p_lock) * activation
 
     # Vital dynamics (Births)
@@ -64,6 +63,8 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, l
     d_I_death = mu * I
     d_R_death = mu * R
 
+    disease_death = mu_disease * I
+
     # --- Differential Equations ---
     
     # Individuals who die from the disease are replaced by new susceptibles
@@ -71,5 +72,6 @@ def seir_ode(y, t, N, beta, sigma, gamma, mu=0.0, mu_disease=0.0, vax_pct=0.0, l
     dEdt = infection - progression - d_E_death
     dIdt = progression - recovery - d_I_death - disease_death
     dRdt = recovery + new_vaccinated - d_R_death
+    dDdt = disease_death
 
-    return dSdt, dEdt, dIdt, dRdt
+    return dSdt, dEdt, dIdt, dRdt, dDdt

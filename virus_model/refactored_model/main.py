@@ -180,7 +180,8 @@ async def run_live_simulation():
 
     # Calculate initial conditions (static vaccination at time 0)
     initial_vaccinated = int(CORRECT_N * p["vax_pct"]) if p["vax_strat"] != "none" else 0
-    y0 = (CORRECT_N - 1 - initial_vaccinated, 1, 0, initial_vaccinated) # S, E, I, R
+    y0 = (CORRECT_N - 1 - initial_vaccinated, 1, 0, initial_vaccinated, 0)  # Aggiunto lo 0 per D
+    #y0 = (CORRECT_N - 1 - initial_vaccinated, 1, 0, initial_vaccinated) # S, E, I, R
 
     # Vaccination parameter for ODE (for newborns)
     # If short-term (mu=0), vax_pct_ode must be 0 (no births).
@@ -192,13 +193,13 @@ async def run_live_simulation():
         CORRECT_N, p["beta"], sigma, p["gamma"], current_mu, AVG_MU_DISEASE, vax_pct_ode,
         p["lockdown_enabled"], p["lockdown_thresh"], p_lock_value
     ))
-    ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3]}
+    ode_curr = {"t": t_ode, "S": ret[:, 0], "E": ret[:, 1], "I": ret[:, 2], "R": ret[:, 3], "Deaths": ret[:, 4]}
     ode_data.set(ode_curr)
 
     # Run Gillespie simulation
     vax_pct_gillespie = p["vax_pct"] if (is_long_term and p["vax_strat"] != "none") else 0.0
     loop = asyncio.get_running_loop()
-    g_df = await loop.run_in_executor(
+    g_df, g_births = await loop.run_in_executor(
         None, run_gillespie_simulation, CORRECT_N, p["beta"], p["gamma"], sigma, steps,
         current_mu, AVG_MU_DISEASE, vax_pct_gillespie,
         p["lockdown_enabled"], p["lockdown_thresh"], p_lock_value
@@ -236,7 +237,38 @@ async def run_live_simulation():
     # Save results to files
     try:
         save_single_run_results(model, run_data.value, ode_curr, g_df)
-        status_msg.set(f"Run results saved in {OUTPUT_DIR}")
+        
+        # Calculate and display mortality percentages for all models
+        total_population = model.total_agents_created
+        #total_population = model.N # N from ABM (used as reference population)
+        
+        abm_mortality_msg = ""
+        if not df.empty and "Deaths" in df.columns and total_population > 0:
+            total_abm_deaths = df["Deaths"].iloc[-1]
+            abm_mortality_percentage = (total_abm_deaths / total_population) * 100
+            abm_mortality_msg = f"ABM: {abm_mortality_percentage:.2f}%"
+
+        ode_mortality_msg = ""
+        if ode_curr and "Deaths" in ode_curr and len(ode_curr["Deaths"]) > 0 and total_population > 0:
+            ode_total_participants = model.N + (current_mu * model.N * steps)
+            total_ode_deaths = ode_curr["Deaths"][-1]
+            ode_mortality_percentage = (total_ode_deaths / ode_total_participants) * 100
+            ode_mortality_msg = f"ODE: {ode_mortality_percentage:.2f}%"
+        
+        gillespie_mortality_msg = ""
+        if g_df is not None and not g_df.empty and "Deaths" in g_df.columns and total_population > 0:
+            g_total_participants = CORRECT_N + g_births
+            total_gillespie_deaths = g_df["Deaths"].iloc[-1]
+            gillespie_mortality_percentage = (total_gillespie_deaths / g_total_participants) * 100
+            gillespie_mortality_msg = f"Gillespie: {gillespie_mortality_percentage:.2f}%"
+
+        mortality_messages = [msg for msg in [abm_mortality_msg, ode_mortality_msg, gillespie_mortality_msg] if msg]
+        
+        if mortality_messages:
+            combined_mortality_msg = "Mortality: " + ", ".join(mortality_messages)
+            status_msg.set(f"{combined_mortality_msg} | Run results saved in {OUTPUT_DIR}")
+        else:
+            status_msg.set(f"Run results saved in {OUTPUT_DIR}")
     except Exception as e:
         status_msg.set(f"Error saving results: {e}")
 
@@ -303,8 +335,21 @@ async def run_batch_analysis():
     stochastic_results.set({"peaks": peaks, "probability": exceeded / sp["runs"] if sp["runs"] > 0 else 0})
     is_analyzing.set(False)
     status_msg.set("Batch analysis complete.")
+
+    # Calculate average mortality
+    avg_mortality_msg = ""
+    if "RunId" in results_df.columns and not results_df.empty and "TotalAgents" in results_df.columns:
+        final_deaths_per_run = results_df.groupby("RunId")["Deaths"].last()
+        final_agents_per_run = results_df.groupby("RunId")["TotalAgents"].last()
+        avg_deaths = final_deaths_per_run.mean()
+        avg_total_agents = final_agents_per_run.mean()
+        total_population = p["N"]
+        if total_population > 0:
+            avg_mortality_percentage = (avg_deaths / avg_total_agents) * 100
+            avg_mortality_msg = f" | Avg. Mortality: {avg_mortality_percentage:.2f}%"
+
     plot_path = save_batch_results_plot(peaks, threshold=sp["threshold"])
-    status_msg.set(f"Batch plot saved: {os.path.basename(plot_path)}")
+    status_msg.set(f"Batch plot saved: {os.path.basename(plot_path)}{avg_mortality_msg}")
 
 
 async def run_parameter_sweep():
@@ -362,22 +407,39 @@ async def run_parameter_sweep():
     results_df = pd.DataFrame(results)
 
     # Process sweep results
-    if sweep_model_param in results_df.columns:
+    res_df = pd.DataFrame()
+    if sweep_model_param in results_df.columns and "TotalAgents" in results_df.columns:
+        # Group by the swept parameter and iteration to process each run individually
+        grouped = results_df.groupby([sweep_model_param, "iteration"])
+        
         # Calculate the peak infected count for each individual run
-        peaks_per_run = results_df.groupby([sweep_model_param, "iteration"]).apply(
-            lambda run_df: (run_df["I_asymp"] + run_df["I_symp"]).max()
-        )
-        # For each parameter value, calculate the mean of the peaks
-        avg_peaks = peaks_per_run.groupby(sweep_model_param).mean()
-        res = list(zip(avg_peaks.index, avg_peaks.values))
-    else:
-        res = []
+        peaks_per_run = grouped.apply(lambda run_df: (run_df["I_asymp"] + run_df["I_symp"]).max())
+        
+        # Calculate the final death count for each individual run
+        deaths_per_run = grouped["Deaths"].last()
+        total_agents_per_run = grouped["TotalAgents"].last()
 
-    sweep_results.set(res)
+        # For each parameter value, calculate the mean of the peaks and deaths
+        avg_peaks = peaks_per_run.groupby(sweep_model_param).mean()
+        avg_deaths = deaths_per_run.groupby(sweep_model_param).mean()
+        avg_total_agents = total_agents_per_run.groupby(sweep_model_param).mean()  # Media del denominatore
+
+        # Create a combined DataFrame with the results, ensuring the correct column name
+        res_df = pd.DataFrame({
+            sw["parameter"]: avg_peaks.index,
+            'avg_peak': avg_peaks.values,
+            'avg_deaths': avg_deaths.values,
+            'avg_total_agents': avg_total_agents.values
+        })
+
+        res_df['mortality_pct'] = (res_df['avg_deaths'] / res_df['avg_total_agents']) * 100
+
+    sweep_results.set(res_df)
     is_sweeping.set(False)
     status_msg.set("Parameter sweep complete.")
-    if res:
-        plot_path = save_sweep_results_plot(res, sw["parameter"])
+
+    if not res_df.empty:
+        plot_path = save_sweep_results_plot(res_df, sw["parameter"])
         status_msg.set(f"Sweep plot saved: {os.path.basename(plot_path)}")
 
 
@@ -478,6 +540,7 @@ def Dashboard():
                     solara.Button("Start Live Run", on_click=lambda: asyncio.create_task(run_live_simulation()), color="primary", disabled=busy, style={"width": "100%", "margin-bottom": "15px"})
 
                     if run_data.value is not None:
+
                         df = run_data.value
                         ode = ode_data.value
                         gsp = gillespie_data.value
@@ -520,7 +583,6 @@ def Dashboard():
                         ax.grid(True, alpha=0.3)
                         solara.FigureMatplotlib(fig)
                         plt.close(fig)
-
                         # --- Spatial Views (Grid/Network and Transition Schema) ---
                         with solara.Row():
                             with solara.Column():
@@ -572,22 +634,43 @@ def Dashboard():
             # --- TAB 3: PARAMETER SWEEP ---
             with solara.lab.Tab("Parameter Sweep"):
                 with solara.Card():
+                    def update_sweep_params(key, value):
+                        sweep_params.set({**sweep_params.value, key: value})
+                        sweep_results.set(None)
+
                     solara.Select("Parameter", value=sweep_params.value["parameter"],
                                   values=["beta", "gamma", "vax_pct", "prob_symp", "lockdown_thresh"],
-                                  on_value=lambda v: sweep_params.set({**sweep_params.value, "parameter": v}))
+                                  on_value=lambda v: update_sweep_params("parameter", v))
                     with solara.Row():
-                        solara.InputFloat("Min", value=sweep_params.value["start"], on_value=lambda v: sweep_params.set({**sweep_params.value, "start": v}))
-                        solara.InputFloat("Max", value=sweep_params.value["end"], on_value=lambda v: sweep_params.set({**sweep_params.value, "end": v}))
-                        solara.InputInt("Steps", value=sweep_params.value["num_steps"], on_value=lambda v: sweep_params.set({**sweep_params.value, "num_steps": v}))
+                        solara.InputFloat("Min", value=sweep_params.value["start"], on_value=lambda v: update_sweep_params("start", v))
+                        solara.InputFloat("Max", value=sweep_params.value["end"], on_value=lambda v: update_sweep_params("end", v))
+                        solara.InputInt("Steps", value=sweep_params.value["num_steps"], on_value=lambda v: update_sweep_params("num_steps", v))
                     solara.Button("Start Parameter Sweep", on_click=lambda: asyncio.create_task(run_parameter_sweep()), color="secondary", disabled=busy)
 
-                    if sweep_results.value:
-                        data = sweep_results.value
-                        fig, ax = plt.subplots(figsize=(8, 4))
-                        ax.plot([x[0] for x in data], [x[1] for x in data], '-o', color='teal')
-                        ax.set_xlabel(sweep_params.value["parameter"])
-                        ax.set_ylabel("Infection Peak")
-                        ax.grid(True)
+                    if sweep_results.value is not None and not sweep_results.value.empty:
+                        data_df = sweep_results.value
+                        param_name = sweep_params.value["parameter"]
+                        
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        
+                        # Primary axis for infection peak
+                        color1 = 'teal'
+                        ax.set_xlabel(param_name, fontsize=12)
+                        ax.set_ylabel("Average Infection Peak (Max)", color=color1, fontsize=12)
+                        ax.plot(data_df[param_name], data_df['avg_peak'], '-o', color=color1, label='Avg. Infection Peak')
+                        ax.tick_params(axis='y', labelcolor=color1)
+                        ax.grid(True, linestyle='--', alpha=0.6)
+
+                        # Secondary axis for mortality
+                        ax2 = ax.twinx()
+                        color2 = 'crimson'
+                        ax2.set_ylabel("Average Mortality (%)", color=color2, fontsize=12)
+                        ax2.plot(data_df[param_name], data_df['mortality_pct'], '-o', color=color2, label='Avg. Mortality (%)')
+                        ax2.tick_params(axis='y', labelcolor=color2)
+                        
+                        ax.set_title(f"Parameter Sweep for '{param_name}'", fontsize=14)
+                        fig.tight_layout()
+                        
                         solara.FigureMatplotlib(fig)
                         plt.close(fig)
 

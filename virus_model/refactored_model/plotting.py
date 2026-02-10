@@ -228,7 +228,7 @@ def draw_petri_net(ax, S, E, I_asymp, I_symp, R):
     ax.set_ylim(0, 1)
     ax.axis('off')
 
-def save_sweep_results_plot(results, param_name):
+def save_sweep_results_plot(results_df, param_name):
     """
     Saves a plot of the results from a parameter sweep.
 
@@ -236,25 +236,37 @@ def save_sweep_results_plot(results, param_name):
     parameter is varied.
 
     Args:
-        results (list): A list of tuples, where each tuple is `(parameter_value, avg_peak)`.
+        results_df (pd.DataFrame): A DataFrame with the results, including the
+                                swept parameter, 'avg_peak', and 'mortality_pct'.
         param_name (str): The name of the parameter that was swept (e.g., 'beta').
 
     Returns:
         str: The file path of the saved plot.
     """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    # Unpack the results into x and y values
-    x_val = [r[0] for r in results]
-    y_val = [r[1] for r in results]
+    x_val = results_df[param_name]
+    peak_val = results_df['avg_peak']
+    mortality_val = results_df['mortality_pct']
 
-    ax.plot(x_val, y_val, '-o', color='teal', linewidth=2)
+    # Plotting infection peak
+    color1 = 'teal'
+    ax.set_xlabel(param_name, fontsize=12)
+    ax.set_ylabel("Average Infection Peak (Max)", color=color1, fontsize=12)
+    ax.plot(x_val, peak_val, '-o', color=color1, linewidth=2, label='Avg. Infection Peak')
+    ax.tick_params(axis='y', labelcolor=color1)
+    ax.grid(True, linestyle='--', alpha=0.6)
 
-    ax.set_title(f"Parameter Sweep: {param_name} - {timestamp}")
-    ax.set_xlabel(param_name)
-    ax.set_ylabel("Average Infection Peak (Max)")
-    ax.grid(True, linestyle='--', alpha=0.7)
+    # Creating a second y-axis for mortality
+    ax2 = ax.twinx()
+    color2 = 'crimson'
+    ax2.set_ylabel("Average Mortality (%)", color=color2, fontsize=12)
+    ax2.plot(x_val, mortality_val, '-o', color=color2, linewidth=2, label='Avg. Mortality (%)')
+    ax2.tick_params(axis='y', labelcolor=color2)
+
+    ax.set_title(f"Parameter Sweep for '{param_name}'", fontsize=14)
+    fig.tight_layout()  # Adjust layout to make room for both y-axis labels
 
     filename = f"sweep_{param_name}_{timestamp}.png"
     plot_path = os.path.join(OUTPUT_DIR, filename)

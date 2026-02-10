@@ -37,6 +37,9 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
     R = N - S - E - I
 
     t = 0.0
+    D = 0
+    cumulative_births = 0
+
 
     # History lists to store simulation trajectory
     t_hist = [t]
@@ -44,6 +47,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
     E_hist = [E]
     I_hist = [I]
     R_hist = [R]
+    D_hist = [D]
 
     while t < max_steps:
         # Dynamic lockdown threshold check for Gillespie
@@ -100,9 +104,11 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
                 if threshold < current_sum:
                     I -= 1; R += 1  # Recovery
                 else:
+                    # DA QUI IN GIÙ SONO TUTTE MORTI CON RIMPIAZZO (QUINDI NASCITE)
+                    cumulative_births += 1
                     current_sum += rate_disease_death
                     if threshold < current_sum:
-                        I -= 1; S += 1  # Disease Death & Respawn as Susceptible
+                        I -= 1; S += 1; D += 1  # Disease Death & Respawn as Susceptible
                     else:
                         # --- Vital Dynamics Events ---
                         current_sum += rate_S_to_R
@@ -129,6 +135,7 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
         E_hist.append(E)
         I_hist.append(I)
         R_hist.append(R)
+        D_hist.append(D)
 
     # Ensure the history extends to max_steps for consistent plotting
     if t < max_steps:
@@ -137,5 +144,6 @@ def run_gillespie_simulation(N, beta, gamma, sigma, max_steps, mu=0.0, mu_diseas
         E_hist.append(E)
         I_hist.append(I)
         R_hist.append(R)
+        D_hist.append(D)
 
-    return pd.DataFrame({'time': t_hist, 'S': S_hist, 'E': E_hist, 'I': I_hist, 'R': R_hist})
+    return pd.DataFrame({'time': t_hist, 'S': S_hist, 'E': E_hist, 'I': I_hist, 'R': R_hist, 'Deaths': D_hist}), cumulative_births

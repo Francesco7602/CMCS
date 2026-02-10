@@ -12,6 +12,7 @@ The key feature of this tool is the simultaneous comparison of three distinct mo
   - **Gillespie's Algorithm (SSA):** A discrete-event, stochastic model that is exact for well-mixed populations.
 - **Interactive Dashboard:**
   - Adjust simulation parameters on the fly and see results instantly.
+  - **Execution Modes:** Choose between "Animated" for step-by-step visualization and "Turbo" for fast, end-of-run results.
   - Live plotting of SEIR curves for all three models.
   - Visualization of agent states on a spatial grid or a network graph.
   - A Transition Schema representation of the final SEIR state distribution.
@@ -23,10 +24,14 @@ The key feature of this tool is the simultaneous comparison of three distinct mo
     - **Erdos-Renyi:** A random graph.
     - **Communities:** A network with distinct communities, enabling targeted interventions.
 - **Multiple Agent Schedulers:**
-  - Includes various agent activation regimes to model different assumptions about time and agent concurrency: `Simultaneous`, `Random`, `Uniform`, and `Poisson`.
+  - Includes various agent activation regimes to model different assumptions about time and agent concurrency:
+    - **Synchronous (Simultaneous):** All agents sense their environment and then apply their state changes simultaneously.
+    - **Uniform (Ordered):** Agents are activated sequentially in a fixed order.
+    - **Random (Shuffled):** Agents are activated sequentially in a random order each step.
+    - **Poisson (Random Interval):** A random number of agents are activated at each step, determined by a Poisson distribution.
 - **Dynamic & Long-Term Policies:**
   - **Vital Dynamics:** Simulates birth and death processes (`mu` parameter) to model open populations in long-term scenarios (e.g., >1 year).
-  - **Disease-Specific Mortality:** Models a Case Fatality Rate (`mu_disease`) where infected agents can die from the disease. Deceased agents are replaced by new susceptible agents to maintain a constant population, distinct from the general birth/death rate.
+  - **Disease-Specific Mortality:** Models a Case Fatality Rate (`mu_disease`) where infected agents can die from the disease. This mortality rate is age-dependent. Deceased agents are replaced by new susceptible agents to maintain a constant population, distinct from the general birth/death rate.
   - **Vaccination:** Supports multiple strategies:
     - Initial vaccination ('random' or 'targeted' by network centrality).
     - Vaccination of newborns in long-term simulations.
